@@ -62,9 +62,17 @@ impl GitAdapter for git::LocalGit {
 /// The set of adapters oil-cop's commands depend on. Construct once per run
 /// (`Adapters::default()` for the real CLI-backed set) and pass it down —
 /// nothing downstream calls `gc::`/`bd::`/`git::` functions directly.
+///
+/// `gc`/`bd` are `+ Sync`: callers fetch independent gc/bd data concurrently
+/// via `std::thread::scope` (each spawned thread only needs `&Adapters`, so
+/// `Sync` -- not `Send` -- is what's required) -- see `assemble::city_view`,
+/// `render::watch::render_rig`. `git` deliberately stays without `+ Sync`:
+/// `LocalGit`'s fetch-throttle cache is a `RefCell` (oil-cop has no
+/// concurrency of its own to guard against -- see its doc comment), which
+/// isn't `Sync`, and nothing needs to call it from more than one thread.
 pub struct Adapters {
-    pub gc: Box<dyn GcAdapter>,
-    pub bd: Box<dyn BdAdapter>,
+    pub gc: Box<dyn GcAdapter + Sync>,
+    pub bd: Box<dyn BdAdapter + Sync>,
     pub git: Box<dyn GitAdapter>,
 }
 

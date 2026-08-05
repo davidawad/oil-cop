@@ -23,26 +23,30 @@ ci:
     cargo machete
     cargo audit
     cargo deny check
-    cargo llvm-cov --workspace --fail-under-lines 90
+    cargo llvm-cov --workspace --fail-under-lines 94
 
 # Deliberately-skipped heavy tier. The canonical Rust standard
 # (config/programming-languages/rust/README.md, this repo's reference is
 # AI/skills/swe-rust-standards/SKILL.md) calls for Kani, Verus, cargo-mutants,
 # cargo-fuzz, loom, and miri here. All five are explicitly out of scope for
-# oil-cop, decided by the project owner: it has zero `unsafe` code, zero
-# concurrency (no thread::spawn/async anywhere), and no financial or
-# safety-critical arithmetic -- the exact risk profile those tools exist
-# for. This recipe exists so that decision is a documented one sitting
-# where the standard expects it, not silent absence (the standard's own
-# "an exclusion without a reason is a review failure" rule, applied to
-# itself).
+# oil-cop, decided by the project owner: it has zero `unsafe` code and no
+# financial or safety-critical arithmetic -- the exact risk profile those
+# tools exist for. (oil-cop does use `std::thread::scope` -- see
+# `Adapters`' doc comment in `src/sources/adapters.rs` -- but only to run
+# independent, read-only gc/bd fetches concurrently and join their owned
+# results; there's no shared mutable state, lock, or atomic for loom to
+# find an interleaving bug in.) This recipe exists so that decision is a
+# documented one sitting where the standard expects it, not silent absence
+# (the standard's own "an exclusion without a reason is a review failure"
+# rule, applied to itself).
 heavy:
     @echo "Deliberately not run for oil-cop (see this recipe's comment in the justfile):"
     @echo "  - Kani (model checking): no unsafe code, no complex arithmetic invariants to prove"
     @echo "  - Verus (deductive proofs): same reason, disproportionate for this codebase"
     @echo "  - cargo-mutants (mutation testing): no critical-path numeric/financial logic"
     @echo "  - cargo-fuzz: no hand-rolled parsers of untrusted binary input (JSON via serde only)"
-    @echo "  - loom (concurrency model checking): oil-cop is single-threaded, nothing to check"
+    @echo "  - loom (concurrency model checking): thread::scope fetches are independent reads"
+    @echo "    joined into owned results, no shared mutable state/locks/atomics to interleave"
     @echo "  - miri (UB detection): no unsafe code for it to find UB in"
 
 # Show real coverage numbers per-file, not just the pass/fail gate.

@@ -2,6 +2,7 @@ use super::{agents, dag, queue, status};
 use crate::assemble;
 use crate::health::Thresholds;
 use crate::sources::adapters::Adapters;
+use crate::sources::bd;
 use chrono::Utc;
 use colored::Colorize;
 use std::io::Write;
@@ -33,7 +34,13 @@ pub fn run(
         println!();
 
         match adapters.gc.status(city) {
-            Ok(raw) => status::render(&assemble::city_view(adapters, raw), Some(tick)),
+            Ok(raw) => {
+                let mut buf: Vec<u8> = Vec::new();
+                if status::render(&assemble::city_view(adapters, raw), Some(tick), &mut buf).is_ok()
+                {
+                    std::io::stdout().write_all(&buf).ok();
+                }
+            }
             Err(e) => println!("{} status: {e}", "error".red().bold()),
         }
 
@@ -79,8 +86,39 @@ fn render_rig(
     w: &mut impl Write,
 ) -> anyhow::Result<()> {
     let resolved = adapters.resolve_rig(city, rig)?;
-    let bd_status = adapters.bd.status(&resolved.path)?;
-    let in_progress = adapters.bd.list(&resolved.path, "in_progress")?;
+
+    // bd.status, the full (non-closed) bead list, and gc.rig_status are all
+    // independent of each other -- fetch all three concurrently instead of
+    // one after another. The full bead list is a superset of "in_progress"
+    // (queue/agents only need that subset, dag wants the whole thing), so
+    // fetching it once and filtering in-process also removes what used to
+    // be a second, redundant `bd list` call just for dag's sake. Bind the
+    // two fields used here (not `adapters` as a whole -- its `git` field
+    // deliberately isn't Sync, see Adapters' doc comment); `git` itself is
+    // still used below, sequentially, via `adapters` directly.
+    let bd_adapter = adapters.bd.as_ref();
+    let gc_adapter = adapters.gc.as_ref();
+    let (bd_status, all_beads, rig_status) = std::thread::scope(|scope| {
+        let path = resolved.path.as_str();
+        let status_h = scope.spawn(|| bd_adapter.status(path));
+        let list_h = scope.spawn(|| bd_adapter.list(path, "open,in_progress,blocked,deferred"));
+        let rig_status_h = scope.spawn(|| gc_adapter.rig_status(city, rig));
+        (
+            status_h.join().expect("bd.status thread panicked"),
+            list_h.join().expect("bd.list thread panicked"),
+            rig_status_h.join().expect("gc.rig_status thread panicked"),
+        )
+    });
+    let bd_status = bd_status?;
+    let all_beads = all_beads?;
+    let rig_status = rig_status?;
+
+    let in_progress: Vec<bd::BeadRaw> = all_beads
+        .iter()
+        .filter(|b| b.status == "in_progress")
+        .cloned()
+        .collect();
+
     let qview = assemble::queue_view(
         &resolved.name,
         &resolved.path,
@@ -93,13 +131,12 @@ fn render_rig(
     queue::render(&qview, Some(tick), 15, w)?;
 
     writeln!(w)?;
-    let rig_status = adapters.gc.rig_status(city, rig)?;
     let suspended = rig_status.rig.suspended;
     let views = assemble::agent_views(rig_status.agents, &in_progress, now, thresholds);
     agents::render(&resolved.name, &views, suspended, Some(tick), w)?;
 
     writeln!(w)?;
-    let dview = assemble::dag_view(adapters, &resolved, false, now)?;
+    let dview = assemble::dag_view_from_beads(adapters, &resolved, &all_beads, now);
     dag::render(&dview, Some(tick), w)?;
 
     Ok(())
@@ -108,8 +145,8 @@ fn render_rig(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sources::gc;
     use crate::sources::mocks::{MockBd, MockGc, MockGit};
-    use crate::sources::{bd, gc};
     use std::collections::HashMap;
 
     fn thresholds() -> Thresholds {

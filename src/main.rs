@@ -109,7 +109,7 @@ fn cmd_status(adapters: &Adapters, city: Option<&str>, json: bool) -> Result<()>
     if json {
         println!("{}", serde_json::to_string_pretty(&view)?);
     } else {
-        render::status::render(&view, None);
+        write_to_stdout(|w| render::status::render(&view, None, w))?;
     }
     Ok(())
 }
@@ -123,8 +123,22 @@ fn cmd_queue(
     thresholds: &Thresholds,
 ) -> Result<()> {
     let resolved = adapters.resolve_rig(city, rig)?;
-    let bd_status = adapters.bd.status(&resolved.path)?;
-    let in_progress = adapters.bd.list(&resolved.path, "in_progress")?;
+    // bd.status and bd.list are independent -- fetch them concurrently
+    // instead of one after another. Bind just `bd` (not `adapters` as a
+    // whole -- its `git` field deliberately isn't Sync, see Adapters' doc
+    // comment) before spawning.
+    let bd_adapter = adapters.bd.as_ref();
+    let (bd_status, in_progress) = std::thread::scope(|scope| {
+        let path = resolved.path.as_str();
+        let status_h = scope.spawn(|| bd_adapter.status(path));
+        let list_h = scope.spawn(|| bd_adapter.list(path, "in_progress"));
+        (
+            status_h.join().expect("bd.status thread panicked"),
+            list_h.join().expect("bd.list thread panicked"),
+        )
+    });
+    let bd_status = bd_status?;
+    let in_progress = in_progress?;
     let now = Utc::now();
     let view = assemble::queue_view(
         &resolved.name,
@@ -151,8 +165,22 @@ fn cmd_agents(
     thresholds: &Thresholds,
 ) -> Result<()> {
     let resolved = adapters.resolve_rig(city, rig)?;
-    let in_progress = adapters.bd.list(&resolved.path, "in_progress")?;
-    let rig_status = adapters.gc.rig_status(city, rig)?;
+    // bd.list and gc.rig_status hit different services entirely --
+    // independent, so fetch them concurrently. Bind the two fields (not
+    // `adapters` as a whole -- its `git` field deliberately isn't Sync).
+    let bd_adapter = adapters.bd.as_ref();
+    let gc_adapter = adapters.gc.as_ref();
+    let (in_progress, rig_status) = std::thread::scope(|scope| {
+        let path = resolved.path.as_str();
+        let list_h = scope.spawn(|| bd_adapter.list(path, "in_progress"));
+        let rig_status_h = scope.spawn(|| gc_adapter.rig_status(city, rig));
+        (
+            list_h.join().expect("bd.list thread panicked"),
+            rig_status_h.join().expect("gc.rig_status thread panicked"),
+        )
+    });
+    let in_progress = in_progress?;
+    let rig_status = rig_status?;
     let now = Utc::now();
     let suspended = rig_status.rig.suspended;
     let views = assemble::agent_views(rig_status.agents, &in_progress, now, thresholds);
@@ -199,4 +227,222 @@ fn cmd_check(
         std::process::exit(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sources::mocks::{MockBd, MockGc, MockGit};
+    use sources::{bd, gc};
+    use std::collections::HashMap;
+
+    fn thresholds() -> Thresholds {
+        Thresholds {
+            stale_after_secs: 1800,
+        }
+    }
+
+    fn bead(id: &str, status: &str, assignee: Option<&str>) -> bd::BeadRaw {
+        bd::BeadRaw {
+            id: id.to_string(),
+            title: format!("title for {id}"),
+            status: status.to_string(),
+            priority: Some(1),
+            assignee: assignee.map(str::to_string),
+            updated_at: Some("2020-01-01T00:00:00Z".to_string()),
+            started_at: None,
+            parent: None,
+            dependencies: vec![],
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    fn adapters_for_rig(rig_path: &str) -> Adapters {
+        let rig = gc::RigRaw {
+            name: "luminate".to_string(),
+            path: rig_path.to_string(),
+            prefix: None,
+            suspended: false,
+            running: Some(true),
+        };
+
+        let mut status_by_dir = HashMap::new();
+        status_by_dir.insert(
+            rig_path.to_string(),
+            bd::StatusResult {
+                summary: bd::StatusSummary {
+                    total_issues: 2,
+                    ready_issues: 0,
+                    in_progress_issues: 1,
+                    blocked_issues: 0,
+                    deferred_issues: 0,
+                    closed_issues: 1,
+                },
+            },
+        );
+
+        let mut list_by_key = HashMap::new();
+        list_by_key.insert(
+            (rig_path.to_string(), "in_progress".to_string()),
+            vec![bead("luminate-1", "in_progress", Some("session-a"))],
+        );
+        list_by_key.insert(
+            (
+                rig_path.to_string(),
+                "open,in_progress,blocked,deferred".to_string(),
+            ),
+            vec![bead("luminate-1", "in_progress", Some("session-a"))],
+        );
+        list_by_key.insert(
+            (
+                rig_path.to_string(),
+                "open,in_progress,blocked,deferred,closed".to_string(),
+            ),
+            vec![bead("luminate-1", "in_progress", Some("session-a"))],
+        );
+
+        let mut rig_status = HashMap::new();
+        rig_status.insert(
+            "luminate".to_string(),
+            gc::RigStatusResult {
+                rig: rig.clone(),
+                agents: vec![gc::RigAgentRaw {
+                    name: "nux".to_string(),
+                    qualified_name: "luminate/nux".to_string(),
+                    runtime_session_name: Some("session-a".to_string()),
+                    session_id: None,
+                    running: true,
+                    suspended: false,
+                    draining: false,
+                    status: Some("running".to_string()),
+                }],
+            },
+        );
+
+        let city_status = gc::StatusResult {
+            city_name: "testcity".to_string(),
+            city_path: "/fake/testcity".to_string(),
+            controller: gc::Controller {
+                running: true,
+                pid: Some(1),
+                mode: Some("supervisor".to_string()),
+                status: None,
+            },
+            running: true,
+            suspended: false,
+            health: gc::HealthBlock {
+                usable: true,
+                degraded: false,
+                signals: vec![],
+            },
+            agents: vec![],
+            rigs: vec![rig.clone()],
+            summary: gc::SummaryBlock {
+                total_agents: 1,
+                running_agents: 1,
+            },
+            partial: false,
+            partial_errors: vec![],
+        };
+
+        Adapters {
+            gc: Box::new(MockGc {
+                status: Some(city_status),
+                rig_list: Some(gc::RigListResult { rigs: vec![rig] }),
+                rig_status,
+            }),
+            bd: Box::new(MockBd {
+                status: status_by_dir,
+                list: list_by_key,
+            }),
+            git: Box::new(MockGit::default()),
+        }
+    }
+
+    #[test]
+    fn cmd_status_succeeds_in_both_json_and_text_mode() {
+        colored::control::set_override(false);
+        let adapters = adapters_for_rig("/fake/luminate");
+        assert!(cmd_status(&adapters, None, true).is_ok());
+        assert!(cmd_status(&adapters, None, false).is_ok());
+    }
+
+    #[test]
+    fn cmd_queue_succeeds_for_a_known_rig_and_errors_for_an_unknown_one() {
+        colored::control::set_override(false);
+        let adapters = adapters_for_rig("/fake/luminate");
+        assert!(cmd_queue(&adapters, None, "luminate", 20, true, &thresholds()).is_ok());
+        assert!(cmd_queue(&adapters, None, "luminate", 20, false, &thresholds()).is_ok());
+        assert!(cmd_queue(&adapters, None, "not-a-real-rig", 20, true, &thresholds()).is_err());
+    }
+
+    #[test]
+    fn cmd_agents_succeeds_for_a_known_rig_and_errors_for_an_unknown_one() {
+        colored::control::set_override(false);
+        let adapters = adapters_for_rig("/fake/luminate");
+        assert!(cmd_agents(&adapters, None, "luminate", true, &thresholds()).is_ok());
+        assert!(cmd_agents(&adapters, None, "luminate", false, &thresholds()).is_ok());
+        assert!(cmd_agents(&adapters, None, "not-a-real-rig", true, &thresholds()).is_err());
+    }
+
+    #[test]
+    fn cmd_dag_succeeds_with_and_without_include_closed() {
+        colored::control::set_override(false);
+        let adapters = adapters_for_rig("/fake/luminate");
+        assert!(cmd_dag(&adapters, None, "luminate", false, true).is_ok());
+        assert!(cmd_dag(&adapters, None, "luminate", true, false).is_ok());
+    }
+
+    #[test]
+    fn cmd_check_succeeds_when_everything_is_healthy() {
+        // Only the "everything's fine" path is exercised here -- the
+        // failure path calls std::process::exit(1) directly, which would
+        // kill the whole test binary if invoked in-process. That path is
+        // covered by the e2e tests instead (a real subprocess whose exit
+        // code is safe to observe from outside). Deliberately a minimal,
+        // rig-free fixture (not `adapters_for_rig`, whose "luminate" rig
+        // has no live agent at the city level and would itself register
+        // as a problem, tripping the exit(1) this test must avoid).
+        colored::control::set_override(false);
+        let adapters = Adapters {
+            gc: Box::new(MockGc {
+                status: Some(gc::StatusResult {
+                    city_name: "testcity".to_string(),
+                    city_path: "/fake/testcity".to_string(),
+                    controller: gc::Controller {
+                        running: true,
+                        pid: Some(1),
+                        mode: Some("supervisor".to_string()),
+                        status: None,
+                    },
+                    running: true,
+                    suspended: false,
+                    health: gc::HealthBlock {
+                        usable: true,
+                        degraded: false,
+                        signals: vec![],
+                    },
+                    agents: vec![],
+                    rigs: vec![],
+                    summary: gc::SummaryBlock {
+                        total_agents: 0,
+                        running_agents: 0,
+                    },
+                    partial: false,
+                    partial_errors: vec![],
+                }),
+                rig_list: None,
+                rig_status: HashMap::new(),
+            }),
+            bd: Box::new(MockBd::default()),
+            git: Box::new(MockGit::default()),
+        };
+        assert!(cmd_check(&adapters, None, None, true, &thresholds()).is_ok());
+    }
+
+    #[test]
+    fn write_to_stdout_propagates_the_inner_closures_error() {
+        let result = write_to_stdout(|_w| Err(std::io::Error::other("boom")));
+        assert!(result.is_err());
+    }
 }

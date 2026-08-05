@@ -45,10 +45,47 @@ pub fn city_view(adapters: &Adapters, raw: gc::StatusResult) -> CityView {
         })
     };
 
+    // One `bd status` subprocess call per non-suspended rig -- independent
+    // of each other, so fetch them all concurrently instead of blocking
+    // through the list one rig at a time (the real win as a city grows
+    // past 1-2 active rigs). Bind just the `bd` field (not `adapters` as a
+    // whole) before spawning: `Adapters` isn't `Sync` as a *whole* struct
+    // (its `git` field deliberately isn't -- see `Adapters`' doc comment),
+    // but `&(dyn BdAdapter + Sync)` on its own is exactly what a spawned
+    // thread needs and nothing more.
+    let bd_adapter = adapters.bd.as_ref();
+    let bead_summaries: Vec<Option<QueueSummary>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = raw
+            .rigs
+            .iter()
+            .map(|r| {
+                if r.suspended {
+                    None
+                } else {
+                    Some(scope.spawn(move || {
+                        bd_adapter.status(&r.path).ok().map(|s| QueueSummary {
+                            total: s.summary.total_issues,
+                            ready: s.summary.ready_issues,
+                            in_progress: s.summary.in_progress_issues,
+                            blocked: s.summary.blocked_issues,
+                            deferred: s.summary.deferred_issues,
+                            closed: s.summary.closed_issues,
+                        })
+                    }))
+                }
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.and_then(|h| h.join().expect("bd.status thread panicked")))
+            .collect()
+    });
+
     let rigs: Vec<RigView> = raw
         .rigs
         .iter()
-        .map(|r| {
+        .zip(bead_summaries)
+        .map(|(r, bead_summary)| {
             let running = rig_has_live_agent(&r.name);
             let health = if r.suspended {
                 Health::Suspended
@@ -56,20 +93,6 @@ pub fn city_view(adapters: &Adapters, raw: gc::StatusResult) -> CityView {
                 Health::Healthy
             } else {
                 Health::Dead
-            };
-            // Suspended rigs have nothing useful to show and the extra
-            // `bd status` call is wasted work -- skip it.
-            let bead_summary = if r.suspended {
-                None
-            } else {
-                adapters.bd.status(&r.path).ok().map(|s| QueueSummary {
-                    total: s.summary.total_issues,
-                    ready: s.summary.ready_issues,
-                    in_progress: s.summary.in_progress_issues,
-                    blocked: s.summary.blocked_issues,
-                    deferred: s.summary.deferred_issues,
-                    closed: s.summary.closed_issues,
-                })
             };
             RigView {
                 name: r.name.clone(),
@@ -196,12 +219,25 @@ pub fn dag_view(
     now: DateTime<Utc>,
 ) -> anyhow::Result<DagView> {
     let statuses = if include_closed {
-        "open,in_progress,blocked,deferred,closed"
+        ALL_STATUSES_INCL_CLOSED
     } else {
-        "open,in_progress,blocked,deferred"
+        ALL_STATUSES_NON_CLOSED
     };
     let beads = adapters.bd.list(&rig.path, statuses)?;
+    Ok(dag_view_from_beads(adapters, rig, &beads, now))
+}
 
+/// Same as `dag_view`, but takes an already-fetched bead list instead of
+/// calling `bd.list` itself -- for callers (`render::watch::render_rig`)
+/// that already fetched the same status set for `queue_view`/`agent_views`
+/// and would otherwise make a second, redundant `bd list` subprocess call
+/// for the exact same data.
+pub fn dag_view_from_beads(
+    adapters: &Adapters,
+    rig: &gc::RigRaw,
+    beads: &[bd::BeadRaw],
+    now: DateTime<Utc>,
+) -> DagView {
     let nodes = beads
         .iter()
         .map(|b| {
@@ -233,12 +269,15 @@ pub fn dag_view(
         })
         .collect();
 
-    Ok(DagView {
+    DagView {
         rig_name: rig.name.clone(),
         rig_path: rig.path.clone(),
         nodes,
-    })
+    }
 }
+
+const ALL_STATUSES_NON_CLOSED: &str = "open,in_progress,blocked,deferred";
+const ALL_STATUSES_INCL_CLOSED: &str = "open,in_progress,blocked,deferred,closed";
 
 /// Health-check verdict: city-wide signals always, plus one rig's
 /// in-progress beads and agents if given. Only `Dead`/`Stale` count as

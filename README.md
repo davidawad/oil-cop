@@ -147,6 +147,24 @@ No Dolt (SQL) adapter -- investigated and decided against (see bead
 one thing raw Dolt access might have added (per-bead merge state) is better
 answered by checking git ancestry directly, which is what `GitAdapter` does.
 
+`Adapters.gc`/`Adapters.bd` are `+ Sync` (`git` deliberately isn't); callers
+that need more than one independent gc/bd fetch (`assemble::city_view`'s
+per-rig `bd.status` rollup, `cmd_queue`, `cmd_agents`,
+`render::watch::render_rig`'s `bd.status` + full bead list + `gc.rig_status`)
+run them concurrently via `std::thread::scope`, joining owned results back
+on the calling thread rather than blocking on each subprocess in turn. Each
+call site binds the specific `&dyn GcAdapter`/`&dyn BdAdapter` field it
+needs *before* the `scope` block and captures only that reference -- a
+closure that captured `adapters` as a whole would require the entire
+`Adapters` struct to be `Sync`, which it isn't (`git`'s fetch-throttle
+cache is a `RefCell`). `assemble::dag_view` was split into a fetching
+wrapper and a pure `dag_view_from_beads(adapters, rig, beads, now)` so
+`render_rig` can pass in the same full bead list it already fetched for
+queue/agents instead of issuing a second, redundant `bd.list` call.
+Verified with a controlled harness (fake `gc`/`bd` stubs sleeping 0.5s
+each): `queue` dropped from ~1.96s (sequential) to ~0.54s, `agents` from
+~1.06s to ~0.53s.
+
 ## Data sources
 
 Everything is read via subprocess calls to the real CLIs, never a direct
@@ -176,7 +194,7 @@ pack's quirks don't hard-crash the tool.
 ## Testing
 
 Run `just ci` for the full gate, or `cargo test` for just the test suite
-(89 tests: 78 unit + 11 e2e). `just coverage` prints the real per-file
+(102 tests: 91 unit + 11 e2e). `just coverage` prints the real per-file
 numbers. Three layers:
 
 - Unit tests, in-module (`#[cfg(test)]`) next to the code they cover:
@@ -231,12 +249,15 @@ snyk.io account/login this repo doesn't have configured).
 Beyond the live commit-time hooks, `just ci` runs the full gate: fmt
 check, clippy (`-D warnings`), the test suite, `cargo machete`, `cargo
 audit`, `cargo deny check` (license/supply-chain -- `deny.toml`), and a
-**coverage gate** (`cargo llvm-cov --fail-under-lines 90`; real measured
-total is 94.16% as of this writing, `just coverage` shows the current
+**coverage gate** (`cargo llvm-cov --fail-under-lines 94`; real measured
+total is 95.6% as of this writing, `just coverage` shows the current
 per-file breakdown). `just heavy` documents what's *deliberately* not
 automated -- Kani, Verus, cargo-mutants, cargo-fuzz, and loom/miri are all
-out of scope for oil-cop specifically (no `unsafe` code, no concurrency,
-no financial/safety-critical arithmetic), not silently missing.
+out of scope for oil-cop specifically (no `unsafe` code, no financial or
+safety-critical arithmetic, and its one use of concurrency --
+`std::thread::scope` in `assemble`/`main`/`render/watch.rs`, see
+"Architecture: adapters" above -- has no shared mutable state for loom to
+model-check), not silently missing.
 
 ## Issue tracking
 

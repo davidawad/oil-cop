@@ -180,3 +180,29 @@ pub struct CheckReport {
     pub ok: bool,
     pub issues: Vec<CheckIssue>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn label_covers_every_health_variant_with_a_distinct_string() {
+        let labels = [
+            Health::Healthy.label(),
+            Health::Idle.label(),
+            Health::Stale.label(),
+            Health::Dead.label(),
+            Health::Suspended.label(),
+            Health::Done.label(),
+            Health::Unknown.label(),
+        ];
+        let unique: std::collections::HashSet<_> = labels.iter().collect();
+        assert_eq!(
+            unique.len(),
+            labels.len(),
+            "every Health variant's label must be distinct"
+        );
+        assert_eq!(Health::Healthy.label(), "healthy");
+        assert_eq!(Health::Unknown.label(), "unknown");
+    }
+}
