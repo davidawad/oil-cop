@@ -1,5 +1,5 @@
 //! Domain types shared between data sources and renderers.
-//! These are the normalized, tool-agnostic views oil-cop actually displays —
+//! These are the normalized, tool-agnostic views oil-cop actually displays --
 //! kept separate from the raw `gc`/`bd` JSON shapes in `sources::*`.
 
 use serde::Serialize;
@@ -10,7 +10,7 @@ pub enum Health {
     /// Actively progressing: running agent with recently-updated work, or a
     /// fresh in-progress bead.
     Healthy,
-    /// Waiting on something upstream (open/blocked/no assigned work) — not
+    /// Waiting on something upstream (open/blocked/no assigned work) -- not
     /// itself a problem.
     Idle,
     /// Should be moving but hasn't updated within the staleness threshold.
@@ -119,4 +119,42 @@ pub struct QueueView {
     pub summary: QueueSummary,
     pub in_progress: Vec<BeadRef>,
     pub health: Health,
+}
+
+/// Bead-lifecycle stage for the DAG view's red -> yellow -> green coloring.
+/// Deliberately separate from `Health` (staleness) -- this is "where is it
+/// in the pipeline," not "is it stuck."
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BeadStage {
+    /// open / blocked / deferred -- not started yet.
+    Pending,
+    /// in_progress -- being worked on right now.
+    Active,
+    /// closed -- landed.
+    Merged,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DagNode {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub priority: Option<i64>,
+    pub assignee: Option<String>,
+    pub parent: Option<String>,
+    pub blocked_by: Vec<String>,
+    pub age_secs: Option<i64>,
+    pub stage: BeadStage,
+    /// True when bd still reports `in_progress` but the bead's branch has
+    /// already landed on its target in git -- the "refinery didn't close
+    /// this" signal this view exists to surface.
+    pub landed_unmerged: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DagView {
+    pub rig_name: String,
+    pub rig_path: String,
+    pub nodes: Vec<DagNode>,
 }

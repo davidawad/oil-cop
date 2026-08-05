@@ -1,6 +1,6 @@
 //! Health -> color/glyph mapping. One place to change the palette.
 
-use crate::model::Health;
+use crate::model::{BeadStage, Health};
 use colored::{ColoredString, Colorize};
 use is_terminal::IsTerminal;
 
@@ -29,7 +29,7 @@ pub fn glyph(h: Health) -> ColoredString {
 }
 
 /// Same as `glyph`, but in `watch` mode a `Healthy` signal spins on each
-/// refresh tick instead of sitting as a static dot — motion reads as "this
+/// refresh tick instead of sitting as a static dot -- motion reads as "this
 /// is actually moving," stillness reads as "this is frozen," which is the
 /// whole point of animating at all. Every other health stays a static dot:
 /// a stale/dead/suspended thing shouldn't look alive.
@@ -54,6 +54,23 @@ pub fn paint(h: Health, s: &str) -> ColoredString {
 
 pub fn label(h: Health) -> ColoredString {
     paint(h, h.label())
+}
+
+/// Bead-lifecycle stage color for the DAG view: red (pending) -> yellow,
+/// flashing between bold and dim on alternating watch ticks (active) ->
+/// green, static (merged). This is a *different* palette axis than
+/// `Health` -- it's "where in the pipeline," not "is it stuck."
+pub fn bead_stage_glyph(stage: BeadStage, tick: Option<u64>) -> ColoredString {
+    let dot = "●";
+    match stage {
+        BeadStage::Pending => dot.red(),
+        BeadStage::Active => match tick {
+            Some(t) if t % 2 == 0 => dot.yellow().bold(),
+            Some(_) => dot.yellow(),
+            None => dot.yellow().bold(),
+        },
+        BeadStage::Merged => dot.green(),
+    }
 }
 
 /// Human-readable "3m ago" / "2h14m ago" from seconds. Negative or missing

@@ -5,7 +5,11 @@
 //! is actually working on right now.
 
 use crate::health::{self, Thresholds};
-use crate::model::{AgentView, BeadRef, CityView, Health, QueueSummary, QueueView, RigView};
+use crate::model::{
+    AgentView, BeadRef, BeadStage, CityView, DagNode, DagView, Health, QueueSummary, QueueView,
+    RigView,
+};
+use crate::sources::adapters::Adapters;
 use crate::sources::{bd, gc};
 use chrono::{DateTime, Utc};
 
@@ -26,7 +30,7 @@ pub fn bead_ref(raw: &bd::BeadRaw, now: DateTime<Utc>, thresholds: &Thresholds) 
 
 pub fn city_view(raw: gc::StatusResult) -> CityView {
     // `gc status`'s top-level rigs array doesn't carry a `running` flag
-    // (that's only on `gc rig list`) — but the agents array does, scoped by
+    // (that's only on `gc rig list`) -- but the agents array does, scoped by
     // a "<rig-name>/<agent>" qualified_name for rig-scoped agents. Roll that
     // up into "does this rig have any live, non-suspended agent right now."
     let rig_has_live_agent = |rig_name: &str| -> bool {
@@ -164,4 +168,59 @@ pub fn agent_views(
             }
         })
         .collect()
+}
+
+/// Build the DAG view for a rig: every non-closed bead (plus closed ones
+/// too, if `include_closed`) as a node, tagged with its lifecycle stage and
+/// whether it's "landed but not closed" -- an in_progress bead whose branch
+/// has already merged into its target in git, the refinery-stuck signal.
+pub fn dag_view(
+    adapters: &Adapters,
+    rig: &gc::RigRaw,
+    include_closed: bool,
+    now: DateTime<Utc>,
+) -> anyhow::Result<DagView> {
+    let statuses = if include_closed {
+        "open,in_progress,blocked,deferred,closed"
+    } else {
+        "open,in_progress,blocked,deferred"
+    };
+    let beads = adapters.bd.list(&rig.path, statuses)?;
+
+    let nodes = beads
+        .iter()
+        .map(|b| {
+            let age = health::age_secs(b.updated_at.as_deref(), now);
+            let stage = match b.status.as_str() {
+                "closed" => BeadStage::Merged,
+                "in_progress" => BeadStage::Active,
+                _ => BeadStage::Pending,
+            };
+            let landed_unmerged = stage == BeadStage::Active
+                && match (b.branch(), b.work_branch()) {
+                    (Some(branch), Some(target)) => {
+                        adapters.git.is_merged(&rig.path, branch, target)
+                    }
+                    _ => false,
+                };
+            DagNode {
+                id: b.id.clone(),
+                title: b.title.clone(),
+                status: b.status.clone(),
+                priority: b.priority,
+                assignee: b.assignee.clone(),
+                parent: b.parent.clone(),
+                blocked_by: b.blocked_by().into_iter().map(String::from).collect(),
+                age_secs: age,
+                stage,
+                landed_unmerged,
+            }
+        })
+        .collect();
+
+    Ok(DagView {
+        rig_name: rig.name.clone(),
+        rig_path: rig.path.clone(),
+        nodes,
+    })
 }
