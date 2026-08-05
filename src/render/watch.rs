@@ -14,9 +14,15 @@ pub fn run(
     interval_secs: u64,
     thresholds: Thresholds,
 ) -> anyhow::Result<()> {
+    // Clear once up front so the first frame starts from a blank screen;
+    // every frame after that re-renders in place (cursor home, redraw,
+    // erase-to-end-of-screen for anything the new frame is shorter than)
+    // instead of blanking the whole screen every tick, which reads as a
+    // visible flicker on real terminals.
+    print!("\x1B[2J");
     let mut tick: u64 = 0;
     loop {
-        print!("\x1B[2J\x1B[H"); // clear screen, cursor home
+        print!("\x1B[H"); // cursor to top-left, no erase -- draw over the previous frame
         let now = Utc::now();
         println!(
             "{} {}  {}",
@@ -38,6 +44,9 @@ pub fn run(
             }
         }
 
+        // Erase anything left over from a previous, longer frame (e.g. the
+        // DAG shrinking as beads close) without touching what was just drawn.
+        print!("\x1B[0J");
         std::io::stdout().flush().ok();
         std::thread::sleep(Duration::from_secs(interval_secs.max(1)));
         tick = tick.wrapping_add(1);
