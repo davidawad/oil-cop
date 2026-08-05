@@ -53,11 +53,9 @@ impl BdAdapter for CliBd {
     }
 }
 
-pub struct LocalGit;
-
-impl GitAdapter for LocalGit {
+impl GitAdapter for git::LocalGit {
     fn is_merged(&self, repo_dir: &str, branch: &str, target_branch: &str) -> bool {
-        git::is_merged_lenient(repo_dir, branch, target_branch)
+        git::LocalGit::is_merged(self, repo_dir, branch, target_branch)
     }
 }
 
@@ -75,7 +73,7 @@ impl Default for Adapters {
         Self {
             gc: Box::new(CliGc),
             bd: Box::new(CliBd),
-            git: Box::new(LocalGit),
+            git: Box::new(git::LocalGit::default()),
         }
     }
 }

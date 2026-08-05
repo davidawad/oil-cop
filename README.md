@@ -154,8 +154,18 @@ Dolt/DB connection:
 
 - `gc status --json`, `gc rig list --json`, `gc rig status --rig <r> --json`
 - `bd status --json`, `bd list --json --status <s>` (run with `-C <rig-path>`)
-- `git -C <rig-path> merge-base --is-ancestor <branch> <target>` (for the
-  DAG's landed-but-unclosed signal only)
+- `git -C <rig-path> merge-base --is-ancestor origin/<branch> origin/<target>`
+  (for the DAG's landed-but-unclosed signal only), preceded by a `git fetch
+  origin` throttled to once per rig path per ~30s
+
+Ancestry is checked against `origin/*` remote-tracking refs, not local
+branch names -- a rig checkout's local branches can be missing or stale
+(never fetched, or only ever pushed from a different worktree) while the
+remote is authoritative for "did this actually land." See
+`8-26-oil-crisis/07-luminate-bd-close-detour-and-the-almost-shipped-hook.txt`
+for the real incident this fixes: `git log --merges`/`gh pr list` are both
+blind to a plain fast-forward push (no merge commit, no PR), which is
+refinery's default merge strategy.
 
 Raw JSON shapes were verified against a live city (`gc --json-schema=result`
 where available), not guessed -- see `src/sources/gc.rs` and
