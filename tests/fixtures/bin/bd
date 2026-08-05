@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Fake `bd` for e2e tests. Real bd's argv always starts with `-C <dir>`
+# (oil-cop's proc wrapper always passes it first), so strip that, then
+# dispatch on the subcommand. `list --status a,b,c` filters the canned bead
+# array down to just the requested statuses, same as real bd would.
+DATA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../data" && pwd)"
+
+ARGS=("$@")
+if [[ "${ARGS[0]}" == "-C" ]]; then
+  ARGS=("${ARGS[@]:2}")
+fi
+
+case "${ARGS[0]}" in
+  status)
+    cat "$DATA_DIR/bd_status.json"
+    ;;
+  list)
+    STATUS_FILTER=""
+    for i in "${!ARGS[@]}"; do
+      if [[ "${ARGS[$i]}" == "--status" ]]; then
+        STATUS_FILTER="${ARGS[$((i + 1))]}"
+      fi
+    done
+    IFS=',' read -ra WANTED <<< "$STATUS_FILTER"
+    WANTED_JSON=$(printf '%s\n' "${WANTED[@]}" | jq -R . | jq -s .)
+    jq --argjson wanted "$WANTED_JSON" \
+      '[.[] | select(.status as $s | $wanted | index($s) != null)]' \
+      "$DATA_DIR/bd_beads.json"
+    ;;
+  *)
+    echo "fake bd: unhandled subcommand '${ARGS[0]}'" >&2
+    exit 1
+    ;;
+esac

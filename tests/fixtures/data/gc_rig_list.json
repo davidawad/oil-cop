@@ -1,0 +1,11 @@
+{
+  "city_name": "testcity",
+  "city_path": "/fake/testcity",
+  "ok": true,
+  "rigs": [
+    {"name": "testrig", "path": "/fake/testrig", "prefix": "tr", "suspended": false, "running": true, "beads": "initialized"},
+    {"name": "sleepyrig", "path": "/fake/sleepyrig", "prefix": "sr", "suspended": true, "running": false, "beads": "initialized"}
+  ],
+  "schema_version": "1",
+  "summary": {"total": 2, "suspended": 1, "running": 1}
+}

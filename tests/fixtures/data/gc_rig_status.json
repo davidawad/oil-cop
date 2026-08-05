@@ -1,0 +1,29 @@
+{
+  "agents": [
+    {
+      "name": "polecat",
+      "qualified_name": "testrig/gastown.polecat",
+      "runtime_session_name": "gastown__polecat-cc-abcd",
+      "session_id": "cc-abcd",
+      "running": true,
+      "suspended": false,
+      "draining": false,
+      "status": "running"
+    },
+    {
+      "name": "refinery",
+      "qualified_name": "testrig/gastown.refinery",
+      "runtime_session_name": "testrig--gastown__refinery",
+      "session_id": "do-zzzz",
+      "running": false,
+      "suspended": false,
+      "draining": false,
+      "status": "stopped"
+    }
+  ],
+  "city_name": "testcity",
+  "city_path": "/fake/testcity",
+  "ok": true,
+  "rig": {"name": "testrig", "path": "/fake/testrig", "prefix": "tr", "suspended": false, "beads": "initialized"},
+  "schema_version": "1"
+}

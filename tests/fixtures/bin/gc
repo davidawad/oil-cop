@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Fake `gc` for e2e tests: ignores --city/--rig values, returns fixed fixture
+# JSON keyed only off which subcommand was invoked.
+DATA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../data" && pwd)"
+
+case "$1" in
+  status)
+    cat "$DATA_DIR/gc_status.json"
+    ;;
+  rig)
+    case "$2" in
+      list) cat "$DATA_DIR/gc_rig_list.json" ;;
+      status) cat "$DATA_DIR/gc_rig_status.json" ;;
+      *) echo "fake gc: unhandled 'rig $2'" >&2; exit 1 ;;
+    esac
+    ;;
+  *)
+    echo "fake gc: unhandled subcommand '$1'" >&2
+    exit 1
+    ;;
+esac

@@ -173,6 +173,32 @@ where available), not guessed -- see `src/sources/gc.rs` and
 missing/extra fields (`#[serde(default)]`) so a version bump or a different
 pack's quirks don't hard-crash the tool.
 
+## Testing
+
+`cargo test` runs two layers:
+
+- Unit tests (`src/health.rs`, `src/sources/git.rs`) for the health-scoring
+  and fetch-throttling logic in isolation.
+- Black-box e2e tests (`tests/e2e.rs`) that invoke the actual compiled
+  binary as a subprocess against fake `gc`/`bd`/`git` executables
+  (`tests/fixtures/bin/`) returning canned real-schema JSON
+  (`tests/fixtures/data/`) — covering `status`/`queue`/`agents`/`dag`/
+  `check`'s JSON output shapes, exit codes, and error messages. Nothing in
+  `tests/` touches a real Gas City stack.
+
+## QA gates on this repo
+
+This repo has `swe-project-plugin-pack` + `swe-project-plugin-pack-rust`
+(awad-marketplace) enabled at project scope: conventional-commit subjects
+and a primary-checkout mutation guard are always enforced; `cargo fmt`,
+`cargo machete`, `cargo audit`, and Semgrep/OSV-Scanner SAST/dependency
+scanning gate every commit *when their tool is installed* (each hook
+soft-skips if its binary is missing, rather than silently trusting an
+absent tool). Confirmed live on this machine: cargo-fmt, cargo-machete,
+cargo-audit, cargo-semver-checks, Semgrep, and OSV-Scanner all installed
+and passing clean. `snyk-gate` remains an accepted soft-skip (needs a
+snyk.io account/login this repo doesn't have configured).
+
 ## Issue tracking
 
 This project tracks its own work with `bd` (beads) -- run `bd ready` or `bd

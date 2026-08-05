@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Fake `git` for e2e tests. oil-cop's GitAdapter always calls this in one of
+# two fixed shapes: `-C <dir> fetch --quiet origin` (no-op success) or
+# `-C <dir> merge-base --is-ancestor <ancestor-ref> <descendant-ref>` (exit
+# 0 = merged). We fake "merged" by whether the ancestor ref name contains
+# "landed" -- lets fixtures encode both outcomes without a real repo.
+if [[ "$3" == "fetch" ]]; then
+  exit 0
+fi
+if [[ "$3" == "merge-base" ]]; then
+  case "$5" in
+    *landed*) exit 0 ;;
+    *) exit 1 ;;
+  esac
+fi
+echo "fake git: unhandled invocation: $*" >&2
+exit 1

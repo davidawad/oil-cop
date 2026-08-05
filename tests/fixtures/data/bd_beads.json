@@ -1,0 +1,64 @@
+[
+  {
+    "id": "test-1",
+    "title": "A stale in-progress bead",
+    "status": "in_progress",
+    "priority": 1,
+    "assignee": "gastown__polecat-cc-abcd",
+    "updated_at": "2020-01-01T00:00:00Z",
+    "started_at": "2020-01-01T00:00:00Z",
+    "parent": null,
+    "dependencies": [],
+    "metadata": {"branch": "polecat/test-1", "gc.work_branch": "master"}
+  },
+  {
+    "id": "test-2",
+    "title": "A ready bead",
+    "status": "open",
+    "priority": 2,
+    "assignee": null,
+    "updated_at": null,
+    "started_at": null,
+    "parent": null,
+    "dependencies": [],
+    "metadata": {}
+  },
+  {
+    "id": "test-3",
+    "title": "A blocked bead",
+    "status": "blocked",
+    "priority": 1,
+    "assignee": null,
+    "updated_at": null,
+    "started_at": null,
+    "parent": null,
+    "dependencies": [
+      {"depends_on_id": "test-2", "type": "blocks"}
+    ],
+    "metadata": {}
+  },
+  {
+    "id": "test-4",
+    "title": "A closed bead",
+    "status": "closed",
+    "priority": 3,
+    "assignee": null,
+    "updated_at": "2020-01-01T00:00:00Z",
+    "started_at": null,
+    "parent": null,
+    "dependencies": [],
+    "metadata": {}
+  },
+  {
+    "id": "test-5",
+    "title": "An in-progress bead whose branch already landed",
+    "status": "in_progress",
+    "priority": 1,
+    "assignee": "gastown__polecat-cc-abcd",
+    "updated_at": "2020-01-01T00:00:00Z",
+    "started_at": "2020-01-01T00:00:00Z",
+    "parent": null,
+    "dependencies": [],
+    "metadata": {"branch": "polecat/test-5-landed", "gc.work_branch": "master"}
+  }
+]
