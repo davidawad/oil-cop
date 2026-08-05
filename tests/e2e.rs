@@ -14,14 +14,36 @@ fn fixtures_bin_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bin")
 }
 
-/// Run the real compiled binary with the fake gc/bd/git prepended to PATH.
-fn run(args: &[&str]) -> Output {
+/// An empty, checked-in directory with no `.config/oil-cop/config.toml` --
+/// pointed to as `$HOME` for every test invocation below so a real config
+/// file on the machine actually running the tests (entirely plausible: the
+/// README tells users to set one up) can never leak into what's supposed
+/// to be a hermetic black-box test. Bit us for real once already
+/// (oilcop-fsk): creating ~/.config/oil-cop/config.toml on this machine to
+/// fix oilcop-bbw immediately broke a test that assumed "no rig given"
+/// meant no rig, when the real global config's `default_rig` silently
+/// supplied one.
+fn fake_home_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_home")
+}
+
+/// Build (but don't yet run) a Command for the compiled binary, with the
+/// fake gc/bd/git prepended to PATH and HOME pointed at an empty directory
+/// so no config file on the host machine can affect the test.
+fn oilcop_command(args: &[&str]) -> Command {
     let real_path = std::env::var("PATH").unwrap_or_default();
     let fake_path_first = format!("{}:{}", fixtures_bin_dir().display(), real_path);
-    Command::new(env!("CARGO_BIN_EXE_oil-cop"))
-        .args(args)
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_oil-cop"));
+    cmd.args(args)
         .env("PATH", fake_path_first)
-        .env("NO_COLOR", "1")
+        .env("HOME", fake_home_dir())
+        .env("NO_COLOR", "1");
+    cmd
+}
+
+/// Run the real compiled binary with the fake gc/bd/git prepended to PATH.
+fn run(args: &[&str]) -> Output {
+    oilcop_command(args)
         .output()
         .expect("failed to spawn oil-cop binary")
 }
@@ -172,17 +194,7 @@ fn check_stale_threshold_only_affects_bead_staleness() {
     // (running: false) is a genuine problem regardless of any staleness
     // threshold, so the check still fails overall; the point of this test
     // is that the *stale-bead* issues specifically disappear.
-    let out = Command::new(env!("CARGO_BIN_EXE_oil-cop"))
-        .args(["--stale-after", "876000h", "check", "testrig"])
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                fixtures_bin_dir().display(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        )
-        .env("NO_COLOR", "1")
+    let out = oilcop_command(&["--stale-after", "876000h", "check", "testrig"])
         .output()
         .expect("failed to spawn oil-cop binary");
     assert_eq!(out.status.code(), Some(1));
@@ -216,17 +228,7 @@ fn city_resolve_failure_surfaces_a_clean_hint_not_raw_json() {
     // file, and a cwd outside any Gas City tree. gc's real failure mode is
     // a JSON error envelope on stderr -- oil-cop must extract the message
     // and add an actionable hint, not dump the raw blob (oilcop-bbw).
-    let out = Command::new(env!("CARGO_BIN_EXE_oil-cop"))
-        .args(["status"])
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                fixtures_bin_dir().display(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        )
-        .env("NO_COLOR", "1")
+    let out = oilcop_command(&["status"])
         .env("FAKE_GC_CITY_RESOLVE_FAILED", "1")
         .output()
         .expect("failed to spawn oil-cop binary");
