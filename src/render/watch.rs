@@ -33,7 +33,7 @@ pub fn run(
         println!();
 
         match adapters.gc.status(city) {
-            Ok(raw) => status::render(&assemble::city_view(raw), Some(tick)),
+            Ok(raw) => status::render(&assemble::city_view(adapters, raw), Some(tick)),
             Err(e) => println!("{} status: {e}", "error".red().bold()),
         }
 

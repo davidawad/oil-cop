@@ -78,6 +78,10 @@ pub struct RigView {
     pub running: bool,
     pub suspended: bool,
     pub health: Health,
+    /// Bead counts for this rig (ready/in_progress/blocked/etc). `None` for
+    /// suspended rigs (skipped -- nothing useful to show) or if the `bd
+    /// status` call for this rig's path failed.
+    pub bead_summary: Option<QueueSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,4 +161,22 @@ pub struct DagView {
     pub rig_name: String,
     pub rig_path: String,
     pub nodes: Vec<DagNode>,
+}
+
+/// One concrete problem found by `oil-cop check` -- only `Dead`/`Stale`
+/// signals are surfaced here (see `health::is_problem`); `Idle`/`Unknown`/
+/// `Suspended`/`Done`/`Healthy` are not failures.
+#[derive(Debug, Clone, Serialize)]
+pub struct CheckIssue {
+    /// e.g. "city", "rig:luminate", "agent:luminate/gastown.nux",
+    /// "bead:luminate-2vr.2"
+    pub scope: String,
+    pub health: Health,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CheckReport {
+    pub ok: bool,
+    pub issues: Vec<CheckIssue>,
 }

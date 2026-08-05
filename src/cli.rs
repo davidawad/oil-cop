@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use clap_complete::Shell;
 
 /// oil-cop -- color-coded visibility into a Gas City stack: rigs, agents,
 /// and bead queues. Works against any city/pack combination through the
@@ -6,7 +7,8 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "oil-cop", version, about, long_about = None)]
 pub struct Cli {
-    /// Path to the city directory (default: `gc`'s own discovery -- walk up from cwd)
+    /// Path to the city directory (default: config file, then `gc`'s own
+    /// discovery -- walk up from cwd)
     #[arg(long, global = true)]
     pub city: Option<String>,
 
@@ -18,9 +20,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// How long an in-progress bead can go without an update before it's "stale"
-    #[arg(long, global = true, default_value = "30m")]
-    pub stale_after: String,
+    /// How long an in-progress bead can go without an update before it's
+    /// "stale" (default: config file, then "30m")
+    #[arg(long, global = true)]
+    pub stale_after: Option<String>,
 
     #[command(subcommand)]
     pub command: Command,
@@ -35,7 +38,8 @@ pub enum Command {
     /// in-progress work highlighted
     Queue {
         /// Rig name (as registered with the city) or a filesystem path
-        rig: String,
+        /// (default: config file's default_rig)
+        rig: Option<String>,
         /// Max in-progress beads to list (sorted stalest-first)
         #[arg(long, default_value_t = 20)]
         limit: usize,
@@ -44,7 +48,8 @@ pub enum Command {
     /// Show a rig's agents and what bead each is currently working on
     Agents {
         /// Rig name (as registered with the city) or a filesystem path
-        rig: String,
+        /// (default: config file's default_rig)
+        rig: Option<String>,
     },
 
     /// Render a rig's beads as a git-graph-style DAG: red (pending) ->
@@ -53,11 +58,22 @@ pub enum Command {
     /// refinery-stuck signal).
     Dag {
         /// Rig name (as registered with the city) or a filesystem path
-        rig: String,
+        /// (default: config file's default_rig)
+        rig: Option<String>,
         /// Include closed (merged) beads too, not just the open pipeline
         #[arg(long)]
         all: bool,
     },
+
+    /// Generate shell completions (bash/zsh/fish/elvish/powershell) and
+    /// print them to stdout.
+    Completion { shell: Shell },
+
+    /// Scriptable health check: exits 0 if nothing is stale/dead, 1
+    /// otherwise. Checks city-wide signals always, plus one rig's
+    /// in-progress beads and agents if given (name or path; default:
+    /// config file's default_rig).
+    Check { rig: Option<String> },
 
     /// Live-refreshing dashboard: city status, plus one rig's queue/agents
     /// if given. Healthy items visibly pulse each refresh; stale/dead ones
@@ -66,7 +82,8 @@ pub enum Command {
         /// Refresh interval in seconds
         #[arg(long, default_value_t = 3)]
         interval: u64,
-        /// Rig to also show queue+agents for (name or path)
+        /// Rig to also show queue+agents for (name or path; default:
+        /// config file's default_rig)
         rig: Option<String>,
     },
 }

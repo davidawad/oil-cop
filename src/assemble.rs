@@ -6,8 +6,8 @@
 
 use crate::health::{self, Thresholds};
 use crate::model::{
-    AgentView, BeadRef, BeadStage, CityView, DagNode, DagView, Health, QueueSummary, QueueView,
-    RigView,
+    AgentView, BeadRef, BeadStage, CheckIssue, CheckReport, CityView, DagNode, DagView, Health,
+    QueueSummary, QueueView, RigView,
 };
 use crate::sources::adapters::Adapters;
 use crate::sources::{bd, gc};
@@ -28,7 +28,7 @@ pub fn bead_ref(raw: &bd::BeadRaw, now: DateTime<Utc>, thresholds: &Thresholds) 
     }
 }
 
-pub fn city_view(raw: gc::StatusResult) -> CityView {
+pub fn city_view(adapters: &Adapters, raw: gc::StatusResult) -> CityView {
     // `gc status`'s top-level rigs array doesn't carry a `running` flag
     // (that's only on `gc rig list`) -- but the agents array does, scoped by
     // a "<rig-name>/<agent>" qualified_name for rig-scoped agents. Roll that
@@ -57,6 +57,20 @@ pub fn city_view(raw: gc::StatusResult) -> CityView {
             } else {
                 Health::Dead
             };
+            // Suspended rigs have nothing useful to show and the extra
+            // `bd status` call is wasted work -- skip it.
+            let bead_summary = if r.suspended {
+                None
+            } else {
+                adapters.bd.status(&r.path).ok().map(|s| QueueSummary {
+                    total: s.summary.total_issues,
+                    ready: s.summary.ready_issues,
+                    in_progress: s.summary.in_progress_issues,
+                    blocked: s.summary.blocked_issues,
+                    deferred: s.summary.deferred_issues,
+                    closed: s.summary.closed_issues,
+                })
+            };
             RigView {
                 name: r.name.clone(),
                 path: r.path.clone(),
@@ -64,6 +78,7 @@ pub fn city_view(raw: gc::StatusResult) -> CityView {
                 running,
                 suspended: r.suspended,
                 health,
+                bead_summary,
             }
         })
         .collect();
@@ -222,5 +237,88 @@ pub fn dag_view(
         rig_name: rig.name.clone(),
         rig_path: rig.path.clone(),
         nodes,
+    })
+}
+
+/// Health-check verdict: city-wide signals always, plus one rig's
+/// in-progress beads and agents if given. Only `Dead`/`Stale` count as
+/// problems (see `health::is_problem`) -- this is meant to be a scriptable
+/// pass/fail gate, not a report of every non-green thing.
+pub fn check(
+    adapters: &Adapters,
+    city: Option<&str>,
+    rig: Option<&str>,
+    thresholds: &Thresholds,
+) -> anyhow::Result<CheckReport> {
+    let now = Utc::now();
+    let mut issues = Vec::new();
+
+    let cview = city_view(adapters, adapters.gc.status(city)?);
+    if health::is_problem(cview.health) {
+        let message = if cview.degraded {
+            format!("city degraded: {}", cview.signals.join("; "))
+        } else {
+            "city unusable".to_string()
+        };
+        issues.push(CheckIssue {
+            scope: "city".to_string(),
+            health: cview.health,
+            message,
+        });
+    }
+    for rv in &cview.rigs {
+        if health::is_problem(rv.health) {
+            issues.push(CheckIssue {
+                scope: format!("rig:{}", rv.name),
+                health: rv.health,
+                message: "rig is active but has no live agents".to_string(),
+            });
+        }
+    }
+
+    if let Some(rig_name) = rig {
+        let resolved = adapters.resolve_rig(city, rig_name)?;
+        let bd_status = adapters.bd.status(&resolved.path)?;
+        let in_progress = adapters.bd.list(&resolved.path, "in_progress")?;
+        let qview = queue_view(
+            &resolved.name,
+            &resolved.path,
+            resolved.running,
+            bd_status,
+            in_progress.clone(),
+            now,
+            thresholds,
+        );
+        for b in &qview.in_progress {
+            if health::is_problem(b.health) {
+                issues.push(CheckIssue {
+                    scope: format!("bead:{}", b.id),
+                    health: b.health,
+                    message: format!("in_progress but stale: {}", b.title),
+                });
+            }
+        }
+
+        let rig_status = adapters.gc.rig_status(city, rig_name)?;
+        let views = agent_views(rig_status.agents, &in_progress, now, thresholds);
+        for a in &views {
+            if health::is_problem(a.health) {
+                let message = if a.health == Health::Dead {
+                    "agent is not running".to_string()
+                } else {
+                    "agent is running but stuck on stale work".to_string()
+                };
+                issues.push(CheckIssue {
+                    scope: format!("agent:{}", a.qualified_name),
+                    health: a.health,
+                    message,
+                });
+            }
+        }
+    }
+
+    Ok(CheckReport {
+        ok: issues.is_empty(),
+        issues,
     })
 }

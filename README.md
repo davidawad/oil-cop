@@ -31,7 +31,8 @@ doesn't have that problem, the pin is harmless.
 ## Commands
 
 - `oil-cop status` -- city-wide overview: controller state, health signals,
-  rigs with a live/dead/suspended rollup.
+  rigs with a live/dead/suspended rollup and per-rig bead counts
+  (ready/in_progress/blocked).
 - `oil-cop queue <rig>` -- a rig's bead counts by state (ready/in_progress/
   blocked/deferred/closed), with the in-progress list sorted stalest-first.
 - `oil-cop agents <rig>` -- each agent in a rig and what bead it's currently
@@ -42,17 +43,56 @@ doesn't have that problem, the pin is harmless.
   lifecycle stage. Flags beads that bd still shows `in_progress` but whose
   branch has already landed in git -- the "refinery didn't close this"
   signal. `--all` includes closed/merged beads too (excluded by default).
+- `oil-cop check [rig]` -- scriptable pass/fail gate for cron/CI: exits 0
+  if nothing is stale/dead, 1 otherwise, printing the offending
+  city/rig/bead/agent items. City-wide signals are always checked; a rig
+  adds its in-progress beads and agents to the check.
 - `oil-cop watch [--interval N] [rig]` -- live-refreshing dashboard: city
-  status, plus the given rig's queue, agents, and DAG. A `healthy` glyph
-  spins on each tick; anything stale/dead/suspended stays a static dot --
-  motion *is* the health signal.
+  status, plus the given rig's queue, agents, and DAG, redrawn in place each
+  tick (no screen-clear flicker). A `healthy` glyph spins on each tick;
+  anything stale/dead/suspended stays a static dot -- motion *is* the health
+  signal.
 
 `<rig>` accepts either a registered rig name or a filesystem path, same as
-`gc` itself.
+`gc` itself -- or falls back to `default_rig` from config (see below) if
+omitted.
+
+## Shell completions
+
+```sh
+# zsh (example -- adjust to wherever your $fpath completion dir is)
+oil-cop completion zsh > /opt/homebrew/share/zsh/site-functions/_oil-cop
+
+# bash
+oil-cop completion bash > /opt/homebrew/etc/bash_completion.d/oil-cop
+
+# fish
+oil-cop completion fish > ~/.config/fish/completions/oil-cop.fish
+```
+
+`elvish` and `powershell` are also supported.
+
+## Config file
+
+CLI flags always win. Otherwise oil-cop looks for a project-local
+`.oilcop.toml` (walking up from cwd, same discovery style `gc` uses for
+`city.toml`), then a global `~/.config/oil-cop/config.toml`. Either is
+optional -- a missing file just means no defaults.
+
+```toml
+# .oilcop.toml
+city = "/Users/david/projects/tools/gas-city-hq"
+default_rig = "luminate"
+stale_after = "45m"
+```
+
+With that in place, `oil-cop queue` / `agents` / `dag` / `watch` all work
+with no `--city`/`<rig>` arguments.
 
 ## Flags (global)
 
-- `--city <path>` -- city directory (default: `gc`'s own cwd-walking discovery)
+- `--city <path>` -- city directory (default: config file, then `gc`'s own
+  cwd-walking discovery)
 - `--json` -- machine-readable JSON instead of colored text, on every command
 - `--no-color` -- force color off (auto-detected already via `NO_COLOR` / non-tty)
 - `--stale-after <dur>` -- staleness threshold for in-progress work, e.g.
@@ -60,26 +100,32 @@ doesn't have that problem, the pin is harmless.
 
 ## Health signals (`status`/`queue`/`agents`)
 
-| Glyph | Meaning |
-|---|---|
-| green (pulses in `watch`) | healthy -- running/in-progress and recently updated |
-| cyan | idle -- waiting on something upstream, not itself a problem |
-| yellow | stale -- should be moving, hasn't updated within the threshold |
-| red | dead -- expected to be running/usable but isn't |
-| dim | suspended -- intentionally paused |
-| gray | done -- closed |
-| magenta | unknown -- not enough data (e.g. a partial status probe) |
+Each state has its own shape as well as its own color -- distinguishable
+even with `--no-color` or a colorblind reader:
+
+| Glyph | Color | Meaning |
+|---|---|---|
+| `●` (pulses in `watch`) | green | healthy -- running/in-progress and recently updated |
+| `◇` | cyan | idle -- waiting on something upstream, not itself a problem |
+| `▲` | yellow | stale -- should be moving, hasn't updated within the threshold |
+| `✕` | red | dead -- expected to be running/usable but isn't |
+| `‖` | dim | suspended -- intentionally paused |
+| `✓` | gray | done -- closed |
+| `?` | magenta | unknown -- not enough data (e.g. a partial status probe) |
 
 ## Bead-stage colors (`dag`)
 
 A separate palette axis from the health signals above -- "where is it in the
-pipeline," not "is it stuck":
+pipeline," not "is it stuck." Shapes are deliberately different from the
+health glyphs above (both appear together in `watch <rig>`), and deliberately
+borrow bd's own status glyphs (open=`○`, in_progress=`◐`, closed=`✓`) so
+they read as familiar:
 
-| Color | Stage |
-|---|---|
-| red | pending -- open / blocked / deferred, not started |
-| yellow, flashes each `watch` tick | active -- in_progress |
-| green, static | merged -- closed |
+| Glyph | Color | Stage |
+|---|---|---|
+| `○` | red | pending -- open / blocked / deferred, not started |
+| `◐`, flashes each `watch` tick | yellow | active -- in_progress |
+| `✓`, static | green | merged -- closed |
 
 An active node also gets a `[landed, not closed]` flag when its branch has
 already merged into its target branch in git but bd still shows

@@ -1,5 +1,6 @@
 mod assemble;
 mod cli;
+mod config;
 mod health;
 mod model;
 mod render;
@@ -7,7 +8,7 @@ mod sources;
 
 use anyhow::Result;
 use chrono::Utc;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use cli::{Cli, Command};
 use health::Thresholds;
 use sources::adapters::Adapters;
@@ -23,20 +24,65 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<()> {
+    let file_cfg = config::load();
+
+    let stale_after = cli
+        .stale_after
+        .clone()
+        .or_else(|| file_cfg.stale_after.clone())
+        .unwrap_or_else(|| "30m".to_string());
     let thresholds = Thresholds {
-        stale_after_secs: health::parse_duration_secs(&cli.stale_after)?,
+        stale_after_secs: health::parse_duration_secs(&stale_after)?,
     };
-    let city = cli.city.as_deref();
+    let city = cli.city.clone().or_else(|| file_cfg.city.clone());
+    let city = city.as_deref();
     let adapters = Adapters::default();
 
+    let rig_or_default = |rig: &Option<String>| -> Result<String> {
+        rig.clone()
+            .or_else(|| file_cfg.default_rig.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no rig given, and no default_rig set in .oilcop.toml / ~/.config/oil-cop/config.toml"
+                )
+            })
+    };
+
     match &cli.command {
-        Command::Status => cmd_status(&adapters, city, cli.json),
-        Command::Queue { rig, limit } => {
-            cmd_queue(&adapters, city, rig, *limit, cli.json, &thresholds)
+        Command::Completion { shell } => {
+            clap_complete::generate(
+                *shell,
+                &mut cli::Cli::command(),
+                "oil-cop",
+                &mut std::io::stdout(),
+            );
+            Ok(())
         }
-        Command::Agents { rig } => cmd_agents(&adapters, city, rig, cli.json, &thresholds),
-        Command::Dag { rig, all } => cmd_dag(&adapters, city, rig, *all, cli.json),
+        Command::Status => cmd_status(&adapters, city, cli.json),
+        Command::Queue { rig, limit } => cmd_queue(
+            &adapters,
+            city,
+            &rig_or_default(rig)?,
+            *limit,
+            cli.json,
+            &thresholds,
+        ),
+        Command::Agents { rig } => cmd_agents(
+            &adapters,
+            city,
+            &rig_or_default(rig)?,
+            cli.json,
+            &thresholds,
+        ),
+        Command::Dag { rig, all } => {
+            cmd_dag(&adapters, city, &rig_or_default(rig)?, *all, cli.json)
+        }
+        Command::Check { rig } => {
+            let rig = rig.clone().or_else(|| file_cfg.default_rig.clone());
+            cmd_check(&adapters, city, rig.as_deref(), cli.json, &thresholds)
+        }
         Command::Watch { interval, rig } => {
+            let rig = rig.clone().or_else(|| file_cfg.default_rig.clone());
             render::watch::run(&adapters, city, rig.as_deref(), *interval, thresholds)
         }
     }
@@ -44,7 +90,7 @@ fn run(cli: Cli) -> Result<()> {
 
 fn cmd_status(adapters: &Adapters, city: Option<&str>, json: bool) -> Result<()> {
     let raw = adapters.gc.status(city)?;
-    let view = assemble::city_view(raw);
+    let view = assemble::city_view(adapters, raw);
     if json {
         println!("{}", serde_json::to_string_pretty(&view)?);
     } else {
@@ -117,6 +163,25 @@ fn cmd_dag(
         println!("{}", serde_json::to_string_pretty(&view)?);
     } else {
         render::dag::render(&view, None);
+    }
+    Ok(())
+}
+
+fn cmd_check(
+    adapters: &Adapters,
+    city: Option<&str>,
+    rig: Option<&str>,
+    json: bool,
+    thresholds: &Thresholds,
+) -> Result<()> {
+    let report = assemble::check(adapters, city, rig, thresholds)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        render::check::render(&report);
+    }
+    if !report.ok {
+        std::process::exit(1);
     }
     Ok(())
 }

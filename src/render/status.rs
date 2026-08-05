@@ -63,7 +63,10 @@ pub fn render(view: &CityView, tick: Option<u64>) {
     }
 
     println!();
-    println!("  {:<2} {:<18} {:<8} HEALTH", "", "RIG", "STATE");
+    println!(
+        "  {:<2} {:<18} {:<9} {:<6} {:<4} {:<6} HEALTH",
+        "", "RIG", "STATE", "READY", "WIP", "BLOCKED"
+    );
     for rig in &view.rigs {
         let state = if rig.suspended {
             "suspended".dimmed()
@@ -72,11 +75,22 @@ pub fn render(view: &CityView, tick: Option<u64>) {
         } else {
             "inactive".yellow()
         };
+        let (ready, wip, blocked) = match &rig.bead_summary {
+            Some(s) => (
+                s.ready.to_string(),
+                s.in_progress.to_string(),
+                s.blocked.to_string(),
+            ),
+            None => ("-".to_string(), "-".to_string(), "-".to_string()),
+        };
         println!(
-            "  {} {:<18} {:<8} {}",
+            "  {} {:<18} {:<9} {:<6} {:<4} {:<6} {}",
             glyph_live(rig.health, tick),
             rig.name,
             state,
+            ready,
+            wip,
+            blocked,
             label(rig.health)
         );
     }

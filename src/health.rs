@@ -124,6 +124,13 @@ pub fn worst_of(signals: impl IntoIterator<Item = Health>) -> Health {
     worst
 }
 
+/// Is this health signal a concrete problem `oil-cop check` should fail
+/// on? `Unknown` (e.g. a partial status probe) is uncertainty, not a proven
+/// failure, so it doesn't fail a check on its own.
+pub fn is_problem(h: Health) -> bool {
+    matches!(h, Health::Dead | Health::Stale)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
