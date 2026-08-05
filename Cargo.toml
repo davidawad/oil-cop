@@ -1,0 +1,25 @@
+[package]
+name = "oil-cop"
+version = "0.1.0"
+edition = "2021"
+description = "Color-coded visibility and health monitoring for a Gas City stack (rigs, agents, bead queues)"
+license = "MIT"
+repository = "https://github.com/davidawad/oil-cop"
+homepage = "https://github.com/davidawad/oil-cop"
+
+[[bin]]
+name = "oil-cop"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+colored = "2"
+is-terminal = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true

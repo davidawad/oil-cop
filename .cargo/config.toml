@@ -1,0 +1,9 @@
+# This machine's PATH puts a Nix-provided `cc` (GCC) ahead of Apple's system
+# clang, which breaks linking against macOS SDK libs like libiconv/CoreFoundation
+# (`ld: library not found for -liconv`). Pin the linker to Apple clang for this
+# project specifically rather than changing global PATH ordering.
+[target.aarch64-apple-darwin]
+linker = "/usr/bin/cc"
+
+[target.x86_64-apple-darwin]
+linker = "/usr/bin/cc"
