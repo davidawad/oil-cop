@@ -103,3 +103,64 @@ impl Adapters {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sources::mocks::MockGc;
+
+    fn adapters_with_rigs(rigs: Vec<gc::RigRaw>) -> Adapters {
+        Adapters {
+            gc: Box::new(MockGc {
+                rig_list: Some(gc::RigListResult { rigs }),
+                ..Default::default()
+            }),
+            bd: Box::new(crate::sources::mocks::MockBd::default()),
+            git: Box::new(crate::sources::mocks::MockGit::default()),
+        }
+    }
+
+    #[test]
+    fn resolve_rig_treats_an_existing_directory_as_a_literal_path_without_calling_gc() {
+        // `Adapters::default()`'s real GcAdapter would try to shell out to
+        // `gc`; a MockGc with nothing configured errors if it's ever
+        // called at all, so this also proves the is_dir() branch never
+        // consults gc for a real directory.
+        let adapters = Adapters {
+            gc: Box::new(MockGc::default()),
+            bd: Box::new(crate::sources::mocks::MockBd::default()),
+            git: Box::new(crate::sources::mocks::MockGit::default()),
+        };
+        let tmp = std::env::temp_dir();
+        let rig = adapters
+            .resolve_rig(None, tmp.to_str().unwrap())
+            .expect("a real directory should resolve without consulting gc");
+        assert_eq!(rig.path, tmp.to_str().unwrap());
+        assert_eq!(rig.name, tmp.to_str().unwrap());
+        assert!(!rig.suspended);
+    }
+
+    #[test]
+    fn resolve_rig_looks_up_a_registered_name_via_gc_rig_list() {
+        let adapters = adapters_with_rigs(vec![gc::RigRaw {
+            name: "luminate".to_string(),
+            path: "/fake/luminate".to_string(),
+            prefix: Some("luminate".to_string()),
+            suspended: false,
+            running: Some(true),
+        }]);
+        let rig = adapters
+            .resolve_rig(None, "luminate")
+            .expect("registered rig name should resolve");
+        assert_eq!(rig.path, "/fake/luminate");
+    }
+
+    #[test]
+    fn resolve_rig_errors_clearly_for_an_unknown_name() {
+        let adapters = adapters_with_rigs(vec![]);
+        let err = adapters
+            .resolve_rig(None, "not-a-real-rig")
+            .expect_err("unknown rig name should error");
+        assert!(err.to_string().contains("no rig named 'not-a-real-rig'"));
+    }
+}

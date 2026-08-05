@@ -106,4 +106,107 @@ mod tests {
         let elapsed = git.last_fetch.lock().unwrap()["some/repo"].elapsed();
         assert!(elapsed < FETCH_THROTTLE);
     }
+
+    // -- is_merged, against a real (local, no-network) git repo -----------
+    //
+    // This is the exact logic oilcop-t37 fixed (checking origin/* refs
+    // instead of local branch names) -- worth verifying against a real
+    // repo, not just a fake stub that hardcodes the answer.
+
+    fn git_cmd(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("failed to spawn git");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A bare "origin" repo plus a working clone with `origin` configured,
+    /// an initial commit on `main`, already pushed. Returns the working
+    /// clone's path (what `LocalGit` operates against).
+    fn setup_repo_with_origin() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare = tmp.path().join("origin.git");
+        let work = tmp.path().join("work");
+
+        git_cmd(tmp.path(), &["init", "--quiet", "--bare", "origin.git"]);
+        git_cmd(
+            tmp.path(),
+            &[
+                "clone",
+                "--quiet",
+                bare.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ],
+        );
+        git_cmd(&work, &["config", "user.email", "test@example.com"]);
+        git_cmd(&work, &["config", "user.name", "Test"]);
+        git_cmd(&work, &["checkout", "--quiet", "-b", "main"]);
+        std::fs::write(work.join("README.md"), "initial\n").unwrap();
+        git_cmd(&work, &["add", "."]);
+        git_cmd(&work, &["commit", "--quiet", "-m", "initial"]);
+        git_cmd(&work, &["push", "--quiet", "-u", "origin", "main"]);
+
+        tmp
+    }
+
+    #[test]
+    fn is_merged_true_for_a_branch_fast_forwarded_into_target_on_origin() {
+        let tmp = setup_repo_with_origin();
+        let work = tmp.path().join("work");
+
+        // Direct-strategy landing: commit straight onto main (no separate
+        // feature branch kept around), same shape as refinery's default
+        // merge_strategy=direct fast-forward push.
+        std::fs::write(work.join("feature.txt"), "done\n").unwrap();
+        git_cmd(&work, &["add", "."]);
+        git_cmd(&work, &["commit", "--quiet", "-m", "feature work"]);
+        git_cmd(&work, &["branch", "polecat/feature-1"]);
+        git_cmd(&work, &["push", "--quiet", "origin", "main"]);
+        git_cmd(&work, &["push", "--quiet", "origin", "polecat/feature-1"]);
+
+        let git = LocalGit::default();
+        assert!(git.is_merged(work.to_str().unwrap(), "polecat/feature-1", "main"));
+    }
+
+    #[test]
+    fn is_merged_false_for_a_branch_pushed_but_never_landed_on_target() {
+        let tmp = setup_repo_with_origin();
+        let work = tmp.path().join("work");
+
+        git_cmd(&work, &["checkout", "--quiet", "-b", "polecat/stuck-1"]);
+        std::fs::write(work.join("stuck.txt"), "not merged\n").unwrap();
+        git_cmd(&work, &["add", "."]);
+        git_cmd(&work, &["commit", "--quiet", "-m", "stuck work"]);
+        git_cmd(
+            &work,
+            &["push", "--quiet", "-u", "origin", "polecat/stuck-1"],
+        );
+
+        let git = LocalGit::default();
+        assert!(!git.is_merged(work.to_str().unwrap(), "polecat/stuck-1", "main"));
+    }
+
+    #[test]
+    fn is_merged_false_when_the_branch_was_never_pushed_to_origin_at_all() {
+        let tmp = setup_repo_with_origin();
+        let work = tmp.path().join("work");
+
+        let git = LocalGit::default();
+        assert!(!git.is_merged(work.to_str().unwrap(), "polecat/never-existed", "main"));
+    }
+
+    #[test]
+    fn is_merged_false_when_repo_dir_is_not_a_git_repo_at_all() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let git = LocalGit::default();
+        assert!(!git.is_merged(tmp.path().to_str().unwrap(), "any-branch", "main"));
+    }
 }

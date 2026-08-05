@@ -119,3 +119,43 @@ pub fn humanize_age(secs: Option<i64>) -> String {
     let rem_hours = hours % 24;
     format!("{days}d{rem_hours}h ago")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn humanize_age_missing_is_an_em_dash() {
+        assert_eq!(humanize_age(None), "—");
+    }
+
+    #[test]
+    fn humanize_age_negative_clamps_to_zero_seconds() {
+        assert_eq!(humanize_age(Some(-5)), "0s ago");
+    }
+
+    #[test]
+    fn humanize_age_seconds_boundary() {
+        assert_eq!(humanize_age(Some(0)), "0s ago");
+        assert_eq!(humanize_age(Some(59)), "59s ago");
+        assert_eq!(humanize_age(Some(60)), "1m ago");
+    }
+
+    #[test]
+    fn humanize_age_minutes_boundary() {
+        assert_eq!(humanize_age(Some(59 * 60)), "59m ago");
+        assert_eq!(humanize_age(Some(60 * 60)), "1h00m ago");
+    }
+
+    #[test]
+    fn humanize_age_hours_boundary_and_padding() {
+        assert_eq!(humanize_age(Some(90 * 60)), "1h30m ago");
+        assert_eq!(humanize_age(Some(23 * 3600 + 59 * 60)), "23h59m ago");
+        assert_eq!(humanize_age(Some(24 * 3600)), "1d0h ago");
+    }
+
+    #[test]
+    fn humanize_age_days() {
+        assert_eq!(humanize_age(Some(3 * 86400 + 5 * 3600)), "3d5h ago");
+    }
+}

@@ -8,7 +8,7 @@ use super::proc::{run_json, Output};
 use anyhow::Result;
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct StatusResult {
     #[serde(default)]
     pub city_name: String,
@@ -34,7 +34,7 @@ pub struct StatusResult {
     pub partial_errors: Vec<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 pub struct Controller {
     #[serde(default)]
     pub running: bool,
@@ -43,7 +43,7 @@ pub struct Controller {
     pub status: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 pub struct HealthBlock {
     #[serde(default)]
     pub usable: bool,
@@ -53,7 +53,7 @@ pub struct HealthBlock {
     pub signals: Vec<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 pub struct SummaryBlock {
     #[serde(default)]
     pub total_agents: i64,
@@ -61,7 +61,7 @@ pub struct SummaryBlock {
     pub running_agents: i64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct AgentRaw {
     #[serde(default)]
     pub qualified_name: String,
@@ -73,7 +73,7 @@ pub struct AgentRaw {
     pub suspended: bool,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 pub struct RigRaw {
     #[serde(default)]
     pub name: String,
@@ -87,13 +87,13 @@ pub struct RigRaw {
     pub running: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct RigListResult {
     #[serde(default)]
     pub rigs: Vec<RigRaw>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct RigStatusResult {
     #[serde(default)]
     pub rig: RigRaw,
@@ -101,7 +101,7 @@ pub struct RigStatusResult {
     pub agents: Vec<RigAgentRaw>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct RigAgentRaw {
     pub name: String,
     #[serde(default)]

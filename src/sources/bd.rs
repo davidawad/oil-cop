@@ -8,13 +8,13 @@ use super::proc::{run_json, Output};
 use anyhow::Result;
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 pub struct StatusResult {
     #[serde(default)]
     pub summary: StatusSummary,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 pub struct StatusSummary {
     #[serde(default)]
     pub total_issues: i64,
@@ -97,4 +97,82 @@ pub fn list(dir: &str, status_filter: &str) -> Result<(Vec<BeadRaw>, Output)> {
     dir_args(dir, &mut args);
     args.extend(["list", "--json", "--flat", "--status", status_filter]);
     run_json("bd", &args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bead_with_metadata(metadata: serde_json::Value) -> BeadRaw {
+        BeadRaw {
+            id: "test-1".to_string(),
+            title: "title".to_string(),
+            status: "in_progress".to_string(),
+            priority: None,
+            assignee: None,
+            updated_at: None,
+            started_at: None,
+            parent: None,
+            dependencies: vec![],
+            metadata,
+        }
+    }
+
+    #[test]
+    fn branch_and_work_branch_read_flat_dotted_keys() {
+        let bead = bead_with_metadata(serde_json::json!({
+            "branch": "polecat/foo-1",
+            "gc.work_branch": "master",
+            "gc.session_id": "cc-abcd"
+        }));
+        assert_eq!(bead.branch(), Some("polecat/foo-1"));
+        assert_eq!(bead.work_branch(), Some("master"));
+    }
+
+    #[test]
+    fn branch_and_work_branch_are_none_when_metadata_is_missing_or_wrong_shape() {
+        let empty = bead_with_metadata(serde_json::json!({}));
+        assert_eq!(empty.branch(), None);
+        assert_eq!(empty.work_branch(), None);
+
+        // metadata present but the field is the wrong JSON type -- as_str()
+        // returns None rather than panicking.
+        let wrong_type = bead_with_metadata(serde_json::json!({"branch": 42}));
+        assert_eq!(wrong_type.branch(), None);
+
+        // metadata isn't even an object -- get() on a non-object Value
+        // returns None, same treatment.
+        let not_an_object = bead_with_metadata(serde_json::json!("just a string"));
+        assert_eq!(not_an_object.branch(), None);
+    }
+
+    #[test]
+    fn blocked_by_only_returns_blocks_type_dependencies() {
+        let mut bead = bead_with_metadata(serde_json::json!({}));
+        bead.dependencies = vec![
+            DependencyRaw {
+                depends_on_id: "parent-1".to_string(),
+                dep_type: "parent-child".to_string(),
+            },
+            DependencyRaw {
+                depends_on_id: "blocker-1".to_string(),
+                dep_type: "blocks".to_string(),
+            },
+            DependencyRaw {
+                depends_on_id: "blocker-2".to_string(),
+                dep_type: "blocks".to_string(),
+            },
+            DependencyRaw {
+                depends_on_id: "related-1".to_string(),
+                dep_type: "related".to_string(),
+            },
+        ];
+        assert_eq!(bead.blocked_by(), vec!["blocker-1", "blocker-2"]);
+    }
+
+    #[test]
+    fn blocked_by_is_empty_when_there_are_no_dependencies() {
+        let bead = bead_with_metadata(serde_json::json!({}));
+        assert!(bead.blocked_by().is_empty());
+    }
 }

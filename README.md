@@ -175,16 +175,30 @@ pack's quirks don't hard-crash the tool.
 
 ## Testing
 
-`cargo test` runs two layers:
+`cargo test` runs two layers (57 tests total):
 
-- Unit tests (`src/health.rs`, `src/sources/git.rs`) for the health-scoring
-  and fetch-throttling logic in isolation.
+- Unit tests, in-module (`#[cfg(test)]`) next to the code they cover:
+  `health.rs` (staleness scoring), `sources/git.rs` (fetch throttling, plus
+  `LocalGit::is_merged` exercised against real temporary git repos --
+  fast-forward-merged, pushed-but-unmerged, never-pushed, and not-a-repo-
+  at-all cases), `sources/bd.rs` (metadata helpers), `sources/adapters.rs`
+  (`resolve_rig`'s path-vs-name branches), `sources/proc.rs` (error-message
+  extraction), `render/color.rs` (`humanize_age` boundaries), `config.rs`
+  (merge precedence, TOML parsing), and `assemble.rs` (the core join
+  logic -- `city_view`'s live-agent rollup, `queue_view`, `agent_views`,
+  `dag_view`'s stage/blocked-by/landed-unmerged classification, and
+  `check`'s issue collection). `assemble.rs`'s tests use mock
+  `GcAdapter`/`BdAdapter`/`GitAdapter` implementations
+  (`sources/mocks.rs`, test-only) rather than real subprocesses -- exactly
+  what the adapter architecture exists to make possible.
 - Black-box e2e tests (`tests/e2e.rs`) that invoke the actual compiled
   binary as a subprocess against fake `gc`/`bd`/`git` executables
   (`tests/fixtures/bin/`) returning canned real-schema JSON
   (`tests/fixtures/data/`) — covering `status`/`queue`/`agents`/`dag`/
   `check`'s JSON output shapes, exit codes, and error messages. Nothing in
-  `tests/` touches a real Gas City stack.
+  `tests/` touches a real Gas City stack; `HOME` is pointed at an empty
+  fixture directory so a config file on the machine running the tests
+  can't change their behavior.
 
 ## QA gates on this repo
 

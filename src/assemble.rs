@@ -322,3 +322,538 @@ pub fn check(
         issues,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sources::mocks::{MockBd, MockGc, MockGit};
+    use chrono::Duration;
+
+    fn now() -> DateTime<Utc> {
+        // Fixed instant (not Utc::now(), which the workflow harness forbids
+        // in scripts and which would make "age" assertions non-deterministic
+        // here regardless) -- every timestamp fixture below is relative to
+        // this.
+        DateTime::parse_from_rfc3339("2026-01-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn rfc3339(dt: DateTime<Utc>) -> String {
+        dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    fn thresholds() -> Thresholds {
+        Thresholds {
+            stale_after_secs: 1800,
+        }
+    }
+
+    fn bead(id: &str, status: &str) -> bd::BeadRaw {
+        bd::BeadRaw {
+            id: id.to_string(),
+            title: format!("title for {id}"),
+            status: status.to_string(),
+            priority: Some(1),
+            assignee: None,
+            updated_at: None,
+            started_at: None,
+            parent: None,
+            dependencies: vec![],
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    fn city_status_raw() -> gc::StatusResult {
+        gc::StatusResult {
+            city_name: "testcity".to_string(),
+            city_path: "/fake/testcity".to_string(),
+            controller: gc::Controller {
+                running: true,
+                pid: Some(1),
+                mode: Some("supervisor".to_string()),
+                status: None,
+            },
+            running: true,
+            suspended: false,
+            health: gc::HealthBlock {
+                usable: true,
+                degraded: false,
+                signals: vec![],
+            },
+            agents: vec![],
+            rigs: vec![],
+            summary: gc::SummaryBlock {
+                total_agents: 0,
+                running_agents: 0,
+            },
+            partial: false,
+            partial_errors: vec![],
+        }
+    }
+
+    fn rig_agent(
+        qualified_name: &str,
+        scope: &str,
+        running: bool,
+        suspended: bool,
+    ) -> gc::AgentRaw {
+        gc::AgentRaw {
+            qualified_name: qualified_name.to_string(),
+            scope: scope.to_string(),
+            running,
+            suspended,
+        }
+    }
+
+    fn rig_raw(name: &str, suspended: bool) -> gc::RigRaw {
+        gc::RigRaw {
+            name: name.to_string(),
+            path: format!("/fake/{name}"),
+            prefix: None,
+            suspended,
+            running: None,
+        }
+    }
+
+    // -- city_view -----------------------------------------------------
+
+    #[test]
+    fn city_view_marks_a_rig_healthy_only_with_a_live_non_suspended_rig_scoped_agent() {
+        let mut raw = city_status_raw();
+        raw.rigs = vec![rig_raw("alive", false), rig_raw("nobody-home", false)];
+        raw.agents = vec![
+            rig_agent("alive/gastown.polecat", "rig", true, false),
+            // Same rig, but suspended -- shouldn't count as "live".
+            rig_agent("alive/gastown.other", "rig", true, true),
+            // Different rig ("nobody-home") has no matching agent at all.
+            rig_agent("city-scope-thing", "city", true, false),
+        ];
+
+        let adapters = Adapters {
+            gc: Box::new(MockGc::default()),
+            bd: Box::new(MockBd {
+                status: [
+                    ("/fake/alive".to_string(), bd::StatusResult::default()),
+                    ("/fake/nobody-home".to_string(), bd::StatusResult::default()),
+                ]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            }),
+            git: Box::new(MockGit::default()),
+        };
+
+        let view = city_view(&adapters, raw);
+        let alive = view.rigs.iter().find(|r| r.name == "alive").unwrap();
+        assert!(alive.running);
+        assert_eq!(alive.health, Health::Healthy);
+
+        let nobody_home = view.rigs.iter().find(|r| r.name == "nobody-home").unwrap();
+        assert!(!nobody_home.running);
+        assert_eq!(nobody_home.health, Health::Dead);
+    }
+
+    #[test]
+    fn city_view_skips_bead_summary_for_suspended_rigs_but_fetches_it_for_active_ones() {
+        let mut raw = city_status_raw();
+        raw.rigs = vec![rig_raw("active", false), rig_raw("sleeping", true)];
+
+        let adapters = Adapters {
+            gc: Box::new(MockGc::default()),
+            bd: Box::new(MockBd {
+                status: [("/fake/active".to_string(), bd::StatusResult::default())]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            }),
+            git: Box::new(MockGit::default()),
+        };
+
+        let view = city_view(&adapters, raw);
+        let active = view.rigs.iter().find(|r| r.name == "active").unwrap();
+        assert!(active.bead_summary.is_some());
+
+        let sleeping = view.rigs.iter().find(|r| r.name == "sleeping").unwrap();
+        assert_eq!(sleeping.health, Health::Suspended);
+        assert!(
+            sleeping.bead_summary.is_none(),
+            "suspended rigs must never trigger the extra bd status call"
+        );
+    }
+
+    #[test]
+    fn city_view_overall_health_reflects_degraded_partial_and_healthy_cases() {
+        let adapters = Adapters {
+            gc: Box::new(MockGc::default()),
+            bd: Box::new(MockBd::default()),
+            git: Box::new(MockGit::default()),
+        };
+
+        let mut degraded = city_status_raw();
+        degraded.health.degraded = true;
+        assert_eq!(city_view(&adapters, degraded).health, Health::Dead);
+
+        let mut unusable = city_status_raw();
+        unusable.health.usable = false;
+        assert_eq!(city_view(&adapters, unusable).health, Health::Dead);
+
+        let mut partial = city_status_raw();
+        partial.partial = true;
+        assert_eq!(city_view(&adapters, partial).health, Health::Unknown);
+
+        assert_eq!(
+            city_view(&adapters, city_status_raw()).health,
+            Health::Healthy
+        );
+    }
+
+    // -- queue_view ------------------------------------------------------
+
+    #[test]
+    fn queue_view_health_is_the_worst_of_its_in_progress_beads() {
+        let t = thresholds();
+        let n = now();
+        let mut fresh = bead("fresh-1", "in_progress");
+        fresh.updated_at = Some(rfc3339(n - Duration::minutes(5)));
+        let mut stale = bead("stale-1", "in_progress");
+        stale.updated_at = Some(rfc3339(n - Duration::hours(2)));
+
+        let view = queue_view(
+            "rig",
+            "/fake/rig",
+            Some(true),
+            bd::StatusResult::default(),
+            vec![fresh, stale],
+            n,
+            &t,
+        );
+        assert_eq!(view.health, Health::Stale);
+        assert_eq!(view.in_progress.len(), 2);
+    }
+
+    #[test]
+    fn queue_view_is_healthy_when_all_in_progress_beads_are_fresh() {
+        let t = thresholds();
+        let n = now();
+        let mut fresh = bead("fresh-1", "in_progress");
+        fresh.updated_at = Some(rfc3339(n - Duration::minutes(1)));
+
+        let view = queue_view(
+            "rig",
+            "/fake/rig",
+            Some(true),
+            bd::StatusResult::default(),
+            vec![fresh],
+            n,
+            &t,
+        );
+        assert_eq!(view.health, Health::Healthy);
+    }
+
+    // -- agent_views -----------------------------------------------------
+
+    fn rig_agent_raw(
+        qualified_name: &str,
+        runtime_session_name: Option<&str>,
+        running: bool,
+        suspended: bool,
+        draining: bool,
+    ) -> gc::RigAgentRaw {
+        gc::RigAgentRaw {
+            name: qualified_name.to_string(),
+            qualified_name: qualified_name.to_string(),
+            runtime_session_name: runtime_session_name.map(String::from),
+            session_id: None,
+            running,
+            suspended,
+            draining,
+            status: None,
+        }
+    }
+
+    #[test]
+    fn agent_views_joins_current_bead_by_runtime_session_name() {
+        let t = thresholds();
+        let n = now();
+        let mut in_progress_bead = bead("bead-1", "in_progress");
+        in_progress_bead.assignee = Some("session-a".to_string());
+        in_progress_bead.updated_at = Some(rfc3339(n - Duration::minutes(1)));
+
+        let agents = vec![
+            rig_agent_raw("rig/agent-a", Some("session-a"), true, false, false),
+            rig_agent_raw("rig/agent-b", Some("session-b"), true, false, false),
+            rig_agent_raw("rig/agent-c", None, true, false, false),
+        ];
+
+        let views = agent_views(agents, &[in_progress_bead], n, &t);
+
+        let a = views
+            .iter()
+            .find(|v| v.qualified_name == "rig/agent-a")
+            .unwrap();
+        assert_eq!(a.current_bead.as_ref().unwrap().id, "bead-1");
+        assert_eq!(a.health, Health::Healthy);
+
+        let b = views
+            .iter()
+            .find(|v| v.qualified_name == "rig/agent-b")
+            .unwrap();
+        assert!(b.current_bead.is_none());
+        assert_eq!(b.health, Health::Idle); // running, no assigned work
+
+        let c = views
+            .iter()
+            .find(|v| v.qualified_name == "rig/agent-c")
+            .unwrap();
+        assert!(c.current_bead.is_none());
+    }
+
+    #[test]
+    fn agent_views_health_priority_suspended_beats_dead_beats_work_state() {
+        let t = thresholds();
+        let n = now();
+
+        let dead = agent_views(
+            vec![rig_agent_raw("rig/a", None, false, false, false)],
+            &[],
+            n,
+            &t,
+        );
+        assert_eq!(dead[0].health, Health::Dead);
+
+        let suspended = agent_views(
+            vec![rig_agent_raw("rig/a", None, false, true, false)],
+            &[],
+            n,
+            &t,
+        );
+        assert_eq!(suspended[0].health, Health::Suspended);
+
+        let draining = agent_views(
+            vec![rig_agent_raw("rig/a", None, true, false, true)],
+            &[],
+            n,
+            &t,
+        );
+        assert_eq!(draining[0].health, Health::Idle);
+    }
+
+    // -- dag_view ---------------------------------------------------------
+
+    fn adapters_for_dag(
+        beads_by_filter: Vec<(&str, &str, Vec<bd::BeadRaw>)>,
+        git: MockGit,
+    ) -> Adapters {
+        let mut list = std::collections::HashMap::new();
+        for (dir, filter, beads) in beads_by_filter {
+            list.insert((dir.to_string(), filter.to_string()), beads);
+        }
+        Adapters {
+            gc: Box::new(MockGc::default()),
+            bd: Box::new(MockBd {
+                list,
+                ..Default::default()
+            }),
+            git: Box::new(git),
+        }
+    }
+
+    #[test]
+    fn dag_view_classifies_stage_by_status() {
+        let rig = rig_raw("rig", false);
+        let beads = vec![
+            bead("open-1", "open"),
+            bead("blocked-1", "blocked"),
+            bead("deferred-1", "deferred"),
+            bead("active-1", "in_progress"),
+            bead("merged-1", "closed"),
+        ];
+        let adapters = adapters_for_dag(
+            vec![(
+                "/fake/rig",
+                "open,in_progress,blocked,deferred,closed",
+                beads,
+            )],
+            MockGit::default(),
+        );
+
+        let view = dag_view(&adapters, &rig, true, now()).unwrap();
+        let stage_of = |id: &str| view.nodes.iter().find(|n| n.id == id).unwrap().stage;
+        assert_eq!(stage_of("open-1"), BeadStage::Pending);
+        assert_eq!(stage_of("blocked-1"), BeadStage::Pending);
+        assert_eq!(stage_of("deferred-1"), BeadStage::Pending);
+        assert_eq!(stage_of("active-1"), BeadStage::Active);
+        assert_eq!(stage_of("merged-1"), BeadStage::Merged);
+    }
+
+    #[test]
+    fn dag_view_excludes_closed_unless_include_closed() {
+        let rig = rig_raw("rig", false);
+        let beads = vec![bead("open-1", "open")];
+        let adapters = adapters_for_dag(
+            vec![("/fake/rig", "open,in_progress,blocked,deferred", beads)],
+            MockGit::default(),
+        );
+        let view = dag_view(&adapters, &rig, false, now()).unwrap();
+        assert_eq!(view.nodes.len(), 1);
+    }
+
+    #[test]
+    fn dag_view_extracts_blocked_by_from_blocks_dependencies_only() {
+        let rig = rig_raw("rig", false);
+        let mut blocked = bead("blocked-1", "blocked");
+        blocked.dependencies = vec![
+            bd::DependencyRaw {
+                depends_on_id: "parent-1".to_string(),
+                dep_type: "parent-child".to_string(),
+            },
+            bd::DependencyRaw {
+                depends_on_id: "blocker-1".to_string(),
+                dep_type: "blocks".to_string(),
+            },
+        ];
+        let adapters = adapters_for_dag(
+            vec![(
+                "/fake/rig",
+                "open,in_progress,blocked,deferred",
+                vec![blocked],
+            )],
+            MockGit::default(),
+        );
+        let view = dag_view(&adapters, &rig, false, now()).unwrap();
+        assert_eq!(view.nodes[0].blocked_by, vec!["blocker-1"]);
+    }
+
+    #[test]
+    fn dag_view_landed_unmerged_requires_branch_and_target_and_git_confirmation() {
+        let rig = rig_raw("rig", false);
+
+        let mut has_both_and_merged = bead("landed-1", "in_progress");
+        has_both_and_merged.metadata =
+            serde_json::json!({"branch": "polecat/landed-1", "gc.work_branch": "master"});
+
+        let mut has_both_not_merged = bead("stuck-1", "in_progress");
+        has_both_not_merged.metadata =
+            serde_json::json!({"branch": "polecat/stuck-1", "gc.work_branch": "master"});
+
+        let mut no_branch_metadata = bead("direct-commit-1", "in_progress");
+        no_branch_metadata.metadata = serde_json::json!({});
+
+        let mut git = MockGit::default();
+        git.merged.insert(
+            (
+                "/fake/rig".to_string(),
+                "polecat/landed-1".to_string(),
+                "master".to_string(),
+            ),
+            true,
+        );
+
+        let adapters = adapters_for_dag(
+            vec![(
+                "/fake/rig",
+                "open,in_progress,blocked,deferred",
+                vec![has_both_and_merged, has_both_not_merged, no_branch_metadata],
+            )],
+            git,
+        );
+        let view = dag_view(&adapters, &rig, false, now()).unwrap();
+
+        let by_id = |id: &str| view.nodes.iter().find(|n| n.id == id).unwrap();
+        assert!(by_id("landed-1").landed_unmerged);
+        assert!(!by_id("stuck-1").landed_unmerged);
+        assert!(
+            !by_id("direct-commit-1").landed_unmerged,
+            "no branch metadata (direct-commit model) must never claim landed_unmerged"
+        );
+    }
+
+    // -- check -------------------------------------------------------------
+
+    fn adapters_for_check(
+        city_status: gc::StatusResult,
+        rig_list: Vec<gc::RigRaw>,
+        bd_status: bd::StatusResult,
+        in_progress: Vec<bd::BeadRaw>,
+        rig_agents: Vec<gc::RigAgentRaw>,
+    ) -> Adapters {
+        let rig_path = rig_list.first().map(|r| r.path.clone()).unwrap_or_default();
+        Adapters {
+            gc: Box::new(MockGc {
+                status: Some(city_status),
+                rig_list: Some(gc::RigListResult {
+                    rigs: rig_list.clone(),
+                }),
+                rig_status: rig_list
+                    .into_iter()
+                    .map(|r| {
+                        (
+                            r.name.clone(),
+                            gc::RigStatusResult {
+                                agents: rig_agents.clone(),
+                                rig: r,
+                            },
+                        )
+                    })
+                    .collect(),
+            }),
+            bd: Box::new(MockBd {
+                status: [(rig_path.clone(), bd_status)].into_iter().collect(),
+                list: [((rig_path, "in_progress".to_string()), in_progress)]
+                    .into_iter()
+                    .collect(),
+            }),
+            git: Box::new(MockGit::default()),
+        }
+    }
+
+    #[test]
+    fn check_is_ok_when_everything_is_healthy() {
+        let adapters = adapters_for_check(
+            city_status_raw(),
+            vec![],
+            bd::StatusResult::default(),
+            vec![],
+            vec![],
+        );
+        let report = check(&adapters, None, None, &thresholds()).unwrap();
+        assert!(report.ok);
+        assert!(report.issues.is_empty());
+    }
+
+    #[test]
+    fn check_flags_a_degraded_city() {
+        let mut raw = city_status_raw();
+        raw.health.degraded = true;
+        raw.health.signals = vec!["dolt is unhappy".to_string()];
+        let adapters = adapters_for_check(raw, vec![], bd::StatusResult::default(), vec![], vec![]);
+        let report = check(&adapters, None, None, &thresholds()).unwrap();
+        assert!(!report.ok);
+        assert!(report.issues[0].message.contains("dolt is unhappy"));
+    }
+
+    #[test]
+    fn check_flags_a_stale_in_progress_bead_and_a_dead_agent_for_the_given_rig() {
+        let mut stale_bead = bead("stale-1", "in_progress");
+        stale_bead.updated_at = Some(rfc3339(now() - Duration::hours(2)));
+        stale_bead.assignee = Some("session-a".to_string());
+
+        let dead_agent = rig_agent_raw("rig/dead-agent", None, false, false, false);
+
+        let adapters = adapters_for_check(
+            city_status_raw(),
+            vec![rig_raw("rig", false)],
+            bd::StatusResult::default(),
+            vec![stale_bead],
+            vec![dead_agent],
+        );
+        let report = check(&adapters, None, Some("rig"), &thresholds()).unwrap();
+        assert!(!report.ok);
+        assert!(report.issues.iter().any(|i| i.scope == "bead:stale-1"));
+        assert!(report
+            .issues
+            .iter()
+            .any(|i| i.scope == "agent:rig/dead-agent" && i.message.contains("not running")));
+    }
+}
