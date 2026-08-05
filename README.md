@@ -175,7 +175,9 @@ pack's quirks don't hard-crash the tool.
 
 ## Testing
 
-`cargo test` runs two layers (57 tests total):
+Run `just ci` for the full gate, or `cargo test` for just the test suite
+(89 tests: 78 unit + 11 e2e). `just coverage` prints the real per-file
+numbers. Three layers:
 
 - Unit tests, in-module (`#[cfg(test)]`) next to the code they cover:
   `health.rs` (staleness scoring), `sources/git.rs` (fetch throttling, plus
@@ -191,6 +193,12 @@ pack's quirks don't hard-crash the tool.
   `GcAdapter`/`BdAdapter`/`GitAdapter` implementations
   (`sources/mocks.rs`, test-only) rather than real subprocesses -- exactly
   what the adapter architecture exists to make possible.
+- Property-based tests (`proptest`) in `health.rs` and `render/color.rs`:
+  `parse_duration_secs`/`humanize_age` never panic on arbitrary input
+  (including `i64::MIN`/`MAX`); `bead_health`/`agent_health` are total
+  functions and their priority rules (e.g. `suspended` always wins) hold
+  for every generated input, not just hand-picked examples; `worst_of` is
+  order-independent.
 - Black-box e2e tests (`tests/e2e.rs`) that invoke the actual compiled
   binary as a subprocess against fake `gc`/`bd`/`git` executables
   (`tests/fixtures/bin/`) returning canned real-schema JSON
@@ -199,6 +207,13 @@ pack's quirks don't hard-crash the tool.
   `tests/` touches a real Gas City stack; `HOME` is pointed at an empty
   fixture directory so a config file on the machine running the tests
   can't change their behavior.
+
+`render/{agents,dag,queue,watch}.rs` write to an injectable `impl
+std::io::Write` rather than calling `println!` directly, specifically so
+their exact output is unit-testable in-process (the e2e tests exercise the
+same code, but through a subprocess, which coverage tooling can't
+attribute back to source -- direct tests were the actual fix, not a
+tooling workaround).
 
 ## QA gates on this repo
 
@@ -212,6 +227,16 @@ absent tool). Confirmed live on this machine: cargo-fmt, cargo-machete,
 cargo-audit, cargo-semver-checks, Semgrep, and OSV-Scanner all installed
 and passing clean. `snyk-gate` remains an accepted soft-skip (needs a
 snyk.io account/login this repo doesn't have configured).
+
+Beyond the live commit-time hooks, `just ci` runs the full gate: fmt
+check, clippy (`-D warnings`), the test suite, `cargo machete`, `cargo
+audit`, `cargo deny check` (license/supply-chain -- `deny.toml`), and a
+**coverage gate** (`cargo llvm-cov --fail-under-lines 90`; real measured
+total is 94.16% as of this writing, `just coverage` shows the current
+per-file breakdown). `just heavy` documents what's *deliberately* not
+automated -- Kani, Verus, cargo-mutants, cargo-fuzz, and loom/miri are all
+out of scope for oil-cop specifically (no `unsafe` code, no concurrency,
+no financial/safety-critical arithmetic), not silently missing.
 
 ## Issue tracking
 

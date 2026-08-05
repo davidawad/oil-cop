@@ -179,3 +179,132 @@ mod tests {
         assert_eq!(h, Health::Dead);
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// A single `(digits, unit)` pair, e.g. `"30"` + `'m'` -> `"30m"`.
+    fn duration_part() -> impl Strategy<Value = (u32, char)> {
+        (
+            0u32..100_000,
+            prop::sample::select(vec!['s', 'm', 'h', 'd']),
+        )
+    }
+
+    fn unit_secs(c: char) -> i64 {
+        match c {
+            's' => 1,
+            'm' => 60,
+            'h' => 3600,
+            'd' => 86400,
+            _ => unreachable!(),
+        }
+    }
+
+    proptest! {
+        /// Any string built from a sequence of `(digits, unit)` pairs parses
+        /// to the exact expected sum in seconds.
+        #[test]
+        fn parse_duration_secs_sums_arbitrary_sequences(
+            parts in prop::collection::vec(duration_part(), 1..8)
+        ) {
+            let input: String = parts
+                .iter()
+                .map(|(n, u)| format!("{n}{u}"))
+                .collect();
+            let expected: i64 = parts
+                .iter()
+                .map(|(n, u)| *n as i64 * unit_secs(*u))
+                .sum();
+            prop_assert_eq!(parse_duration_secs(&input).unwrap(), expected);
+        }
+
+        /// No arbitrary input string, however malformed, should ever panic --
+        /// only `Ok` or `Err`.
+        #[test]
+        fn parse_duration_secs_never_panics_on_arbitrary_strings(s in ".*") {
+            let _ = parse_duration_secs(&s);
+        }
+
+        /// `bead_health` never panics for any status string / age / threshold.
+        #[test]
+        fn bead_health_never_panics(
+            status in ".*",
+            age in prop::option::of(any::<i64>()),
+            stale_after_secs in any::<i64>(),
+        ) {
+            let t = Thresholds { stale_after_secs };
+            let _ = bead_health(&status, age, &t);
+        }
+
+        /// `agent_health` never panics for any combination of inputs, and the
+        /// documented priority rules hold: `suspended` always wins.
+        #[test]
+        fn agent_health_never_panics_and_suspended_always_wins(
+            running in any::<bool>(),
+            suspended in any::<bool>(),
+            draining in any::<bool>(),
+            has_fresh_work in prop::option::of(any::<bool>()),
+        ) {
+            let h = agent_health(running, suspended, draining, has_fresh_work);
+            if suspended {
+                prop_assert_eq!(h, Health::Suspended);
+            }
+        }
+
+        /// Documented priority: when not suspended, `!running` always wins
+        /// (Dead), regardless of draining/has_fresh_work.
+        #[test]
+        fn agent_health_dead_wins_over_draining_and_work_state(
+            draining in any::<bool>(),
+            has_fresh_work in prop::option::of(any::<bool>()),
+        ) {
+            let h = agent_health(false, false, draining, has_fresh_work);
+            prop_assert_eq!(h, Health::Dead);
+        }
+
+        /// `worst_of` always returns one of the input elements (or the
+        /// default `Done` for an empty vec), and is order-independent.
+        #[test]
+        fn worst_of_returns_an_input_element_and_is_order_independent(
+            signals in prop::collection::vec(health_strategy(), 0..12),
+            rotate_by in 0usize..12,
+        ) {
+            let original = worst_of(signals.clone());
+            if signals.is_empty() {
+                prop_assert_eq!(original, Health::Done);
+            } else {
+                prop_assert!(signals.contains(&original));
+            }
+
+            // Re-ordering the input must never change the result: check
+            // full reversal plus an arbitrary rotation, two cheap ways to
+            // permute without pulling in a shuffle dependency, still enough
+            // to catch order-dependence bugs.
+            let mut reversed = signals.clone();
+            reversed.reverse();
+            prop_assert_eq!(worst_of(reversed), original);
+
+            if !signals.is_empty() {
+                let mut rotated = signals.clone();
+                let n = rotated.len();
+                rotated.rotate_left(rotate_by % n);
+                prop_assert_eq!(worst_of(rotated), original);
+            }
+        }
+    }
+
+    fn health_strategy() -> impl Strategy<Value = Health> {
+        prop::sample::select(vec![
+            Health::Healthy,
+            Health::Idle,
+            Health::Stale,
+            Health::Dead,
+            Health::Suspended,
+            Health::Done,
+            Health::Unknown,
+        ])
+    }
+}

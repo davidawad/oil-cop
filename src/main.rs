@@ -12,6 +12,21 @@ use clap::{CommandFactory, Parser};
 use cli::{Cli, Command};
 use health::Thresholds;
 use sources::adapters::Adapters;
+use std::io::Write;
+
+/// Thin wrapper around the render functions that write into a generic
+/// `impl Write` (rather than printing directly) so they're unit-testable in
+/// isolation: build the output in memory, then flush it to real stdout in
+/// one write.
+fn write_to_stdout<F>(f: F) -> Result<()>
+where
+    F: FnOnce(&mut Vec<u8>) -> std::io::Result<()>,
+{
+    let mut buf = Vec::new();
+    f(&mut buf)?;
+    std::io::stdout().write_all(&buf)?;
+    Ok(())
+}
 
 fn main() {
     let cli = Cli::parse();
@@ -123,7 +138,7 @@ fn cmd_queue(
     if json {
         println!("{}", serde_json::to_string_pretty(&view)?);
     } else {
-        render::queue::render(&view, None, limit);
+        write_to_stdout(|w| render::queue::render(&view, None, limit, w))?;
     }
     Ok(())
 }
@@ -144,7 +159,7 @@ fn cmd_agents(
     if json {
         println!("{}", serde_json::to_string_pretty(&views)?);
     } else {
-        render::agents::render(&resolved.name, &views, suspended, None);
+        write_to_stdout(|w| render::agents::render(&resolved.name, &views, suspended, None, w))?;
     }
     Ok(())
 }
@@ -162,7 +177,7 @@ fn cmd_dag(
     if json {
         println!("{}", serde_json::to_string_pretty(&view)?);
     } else {
-        render::dag::render(&view, None);
+        write_to_stdout(|w| render::dag::render(&view, None, w))?;
     }
     Ok(())
 }

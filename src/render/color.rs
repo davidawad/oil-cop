@@ -159,3 +159,33 @@ mod tests {
         assert_eq!(humanize_age(Some(3 * 86400 + 5 * 3600)), "3d5h ago");
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Never panics for any `Option<i64>`, including the extremes, and
+        /// always produces a non-empty string that's either the em-dash or
+        /// ends in "ago".
+        #[test]
+        fn humanize_age_never_panics_and_always_well_formed(secs in any::<i64>()) {
+            let out = humanize_age(Some(secs));
+            prop_assert!(!out.is_empty());
+            prop_assert!(out == "—" || out.ends_with("ago"));
+        }
+
+    }
+
+    #[test]
+    fn humanize_age_extremes_do_not_panic() {
+        let min = humanize_age(Some(i64::MIN));
+        assert!(min == "—" || min.ends_with("ago"));
+        assert!(!min.is_empty());
+
+        let max = humanize_age(Some(i64::MAX));
+        assert!(max == "—" || max.ends_with("ago"));
+        assert!(!max.is_empty());
+    }
+}

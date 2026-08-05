@@ -21,20 +21,25 @@
 //! `watch` loop polling every few seconds doesn't hammer the remote on
 //! every tick.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const FETCH_THROTTLE: Duration = Duration::from_secs(30);
 
+/// `oil-cop` is single-threaded (no `thread::spawn`/`async` anywhere in
+/// `src/`), so this cache only ever needs interior mutability for a
+/// single-owner struct, not real cross-thread synchronization -- a
+/// `RefCell` is the honest tool here, not a `Mutex` that's never actually
+/// contended.
 pub struct LocalGit {
-    last_fetch: Mutex<HashMap<String, Instant>>,
+    last_fetch: RefCell<HashMap<String, Instant>>,
 }
 
 impl Default for LocalGit {
     fn default() -> Self {
         Self {
-            last_fetch: Mutex::new(HashMap::new()),
+            last_fetch: RefCell::new(HashMap::new()),
         }
     }
 }
@@ -59,7 +64,7 @@ impl LocalGit {
     /// remote-tracking refs are already on disk, not an error.
     fn fetch_throttled(&self, repo_dir: &str) {
         {
-            let mut last = self.last_fetch.lock().unwrap();
+            let mut last = self.last_fetch.borrow_mut();
             if let Some(t) = last.get(repo_dir) {
                 if t.elapsed() < FETCH_THROTTLE {
                     return;
@@ -100,10 +105,9 @@ mod tests {
         // First call inserts a timestamp; immediately re-checking the same
         // key must see it as "too soon" without needing a real repo/fetch.
         git.last_fetch
-            .lock()
-            .unwrap()
+            .borrow_mut()
             .insert("some/repo".to_string(), Instant::now());
-        let elapsed = git.last_fetch.lock().unwrap()["some/repo"].elapsed();
+        let elapsed = git.last_fetch.borrow()["some/repo"].elapsed();
         assert!(elapsed < FETCH_THROTTLE);
     }
 

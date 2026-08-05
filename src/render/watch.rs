@@ -39,8 +39,18 @@ pub fn run(
 
         if let Some(rig_name) = rig {
             println!();
-            if let Err(e) = render_rig(adapters, city, rig_name, now, &thresholds, tick) {
-                println!("{} rig '{rig_name}': {e}", "error".red().bold());
+            // Build the whole rig section into a buffer, then flush it to
+            // real stdout in one write -- this both keeps the render logic
+            // itself (`render_rig`) directly unit-testable (it just writes
+            // into any `impl Write`) and, as a side effect, cuts down
+            // flicker further versus writing each sub-section straight to
+            // the terminal as it's produced.
+            let mut buf: Vec<u8> = Vec::new();
+            match render_rig(adapters, city, rig_name, now, &thresholds, tick, &mut buf) {
+                Ok(()) => {
+                    std::io::stdout().write_all(&buf).ok();
+                }
+                Err(e) => println!("{} rig '{rig_name}': {e}", "error".red().bold()),
             }
         }
 
@@ -53,6 +63,12 @@ pub fn run(
     }
 }
 
+/// Assembles and renders one rig's queue/agents/dag sections into `w`. Pure
+/// glue over `assemble::*` + the sub-renderers -- kept as its own function
+/// (rather than inlined in the `loop` above) specifically so it's directly
+/// unit-testable against mock adapters, without needing the infinite loop
+/// or a real terminal.
+#[allow(clippy::too_many_arguments)]
 fn render_rig(
     adapters: &Adapters,
     city: Option<&str>,
@@ -60,6 +76,7 @@ fn render_rig(
     now: chrono::DateTime<Utc>,
     thresholds: &Thresholds,
     tick: u64,
+    w: &mut impl Write,
 ) -> anyhow::Result<()> {
     let resolved = adapters.resolve_rig(city, rig)?;
     let bd_status = adapters.bd.status(&resolved.path)?;
@@ -73,17 +90,152 @@ fn render_rig(
         now,
         thresholds,
     );
-    queue::render(&qview, Some(tick), 15);
+    queue::render(&qview, Some(tick), 15, w)?;
 
-    println!();
+    writeln!(w)?;
     let rig_status = adapters.gc.rig_status(city, rig)?;
     let suspended = rig_status.rig.suspended;
     let views = assemble::agent_views(rig_status.agents, &in_progress, now, thresholds);
-    agents::render(&resolved.name, &views, suspended, Some(tick));
+    agents::render(&resolved.name, &views, suspended, Some(tick), w)?;
 
-    println!();
+    writeln!(w)?;
     let dview = assemble::dag_view(adapters, &resolved, false, now)?;
-    dag::render(&dview, Some(tick));
+    dag::render(&dview, Some(tick), w)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sources::mocks::{MockBd, MockGc, MockGit};
+    use crate::sources::{bd, gc};
+    use std::collections::HashMap;
+
+    fn thresholds() -> Thresholds {
+        Thresholds {
+            stale_after_secs: 1800,
+        }
+    }
+
+    fn bead(id: &str, status: &str, assignee: Option<&str>) -> bd::BeadRaw {
+        bd::BeadRaw {
+            id: id.to_string(),
+            title: format!("title for {id}"),
+            status: status.to_string(),
+            priority: Some(1),
+            assignee: assignee.map(str::to_string),
+            updated_at: Some("2020-01-01T00:00:00Z".to_string()),
+            started_at: None,
+            parent: None,
+            dependencies: vec![],
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    fn adapters_for_rig(rig_path: &str) -> Adapters {
+        let rig = gc::RigRaw {
+            name: "luminate".to_string(),
+            path: rig_path.to_string(),
+            prefix: None,
+            suspended: false,
+            running: Some(true),
+        };
+        let mut status_by_dir = HashMap::new();
+        status_by_dir.insert(
+            rig_path.to_string(),
+            bd::StatusResult {
+                summary: bd::StatusSummary {
+                    total_issues: 2,
+                    ready_issues: 0,
+                    in_progress_issues: 1,
+                    blocked_issues: 0,
+                    deferred_issues: 0,
+                    closed_issues: 1,
+                },
+            },
+        );
+        let mut list_by_key = HashMap::new();
+        list_by_key.insert(
+            (rig_path.to_string(), "in_progress".to_string()),
+            vec![bead("luminate-1", "in_progress", Some("session-a"))],
+        );
+        list_by_key.insert(
+            (
+                rig_path.to_string(),
+                "open,in_progress,blocked,deferred".to_string(),
+            ),
+            vec![bead("luminate-1", "in_progress", Some("session-a"))],
+        );
+
+        let mut rig_status = HashMap::new();
+        rig_status.insert(
+            "luminate".to_string(),
+            gc::RigStatusResult {
+                rig: rig.clone(),
+                agents: vec![gc::RigAgentRaw {
+                    name: "nux".to_string(),
+                    qualified_name: "luminate/nux".to_string(),
+                    runtime_session_name: Some("session-a".to_string()),
+                    session_id: None,
+                    running: true,
+                    suspended: false,
+                    draining: false,
+                    status: Some("running".to_string()),
+                }],
+            },
+        );
+
+        Adapters {
+            gc: Box::new(MockGc {
+                status: None,
+                rig_list: Some(gc::RigListResult { rigs: vec![rig] }),
+                rig_status,
+            }),
+            bd: Box::new(MockBd {
+                status: status_by_dir,
+                list: list_by_key,
+            }),
+            git: Box::new(MockGit::default()),
+        }
+    }
+
+    #[test]
+    fn render_rig_assembles_queue_agents_and_dag_sections() {
+        colored::control::set_override(false);
+        let adapters = adapters_for_rig("/fake/luminate");
+        let now = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:10:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut buf = Vec::new();
+        render_rig(&adapters, None, "luminate", now, &thresholds(), 0, &mut buf)
+            .expect("render_rig should succeed against fully-configured mocks");
+        let out = String::from_utf8(buf).unwrap();
+
+        // Queue section.
+        assert!(out.contains("luminate"));
+        assert!(out.contains("2 total"));
+        // Agents section.
+        assert!(out.contains("nux"));
+        assert!(out.contains("luminate-1"));
+        // DAG section.
+        assert!(out.contains("title for luminate-1"));
+    }
+
+    #[test]
+    fn render_rig_surfaces_an_unknown_rig_as_an_error_not_a_panic() {
+        let adapters = adapters_for_rig("/fake/luminate");
+        let now = Utc::now();
+        let mut buf = Vec::new();
+        let result = render_rig(
+            &adapters,
+            None,
+            "not-a-real-rig",
+            now,
+            &thresholds(),
+            0,
+            &mut buf,
+        );
+        assert!(result.is_err());
+    }
 }
