@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "oilcop",
+  "project_id": "f528eac5-6b8f-44a3-a0dd-f88651a049d4"
+}
