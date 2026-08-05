@@ -209,3 +209,31 @@ fn unknown_rig_name_fails_clearly() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("no rig named"));
 }
+
+#[test]
+fn city_resolve_failure_surfaces_a_clean_hint_not_raw_json() {
+    // Reproduces a real report: running oil-cop with no --city, no config
+    // file, and a cwd outside any Gas City tree. gc's real failure mode is
+    // a JSON error envelope on stderr -- oil-cop must extract the message
+    // and add an actionable hint, not dump the raw blob (oilcop-bbw).
+    let out = Command::new(env!("CARGO_BIN_EXE_oil-cop"))
+        .args(["status"])
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                fixtures_bin_dir().display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("NO_COLOR", "1")
+        .env("FAKE_GC_CITY_RESOLVE_FAILED", "1")
+        .output()
+        .expect("failed to spawn oil-cop binary");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("not in a city directory"));
+    assert!(stderr.contains("--city"));
+    assert!(stderr.contains(".oilcop.toml"));
+    assert!(!stderr.contains("schema_version"));
+}

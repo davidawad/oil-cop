@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 # Fake `gc` for e2e tests: ignores --city/--rig values, returns fixed fixture
-# JSON keyed only off which subcommand was invoked.
+# JSON keyed only off which subcommand was invoked. Set
+# FAKE_GC_CITY_RESOLVE_FAILED=1 to simulate the real "not in a city
+# directory" failure mode instead (oilcop-bbw).
 DATA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../data" && pwd)"
+
+if [[ "$FAKE_GC_CITY_RESOLVE_FAILED" == "1" ]]; then
+  echo '{"schema_version":"1","level":"error","code":"city_resolve_failed","message":"gc '"$1"': not in a city directory (no city.toml or .gc/ found)","exit_code":1}' >&2
+  exit 1
+fi
 
 case "$1" in
   status)
