@@ -2,14 +2,18 @@
   "hooks": {
     "SessionStart": [
       {
+        "matcher": "",
         "hooks": [
           {
-            "command": "bd prime --hook-json",
-            "type": "command"
+            "type": "command",
+            "command": "bd prime --hook-json"
           }
-        ],
-        "matcher": ""
+        ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "swe-project-plugin-pack@awad-marketplace": true,
+    "swe-project-plugin-pack-rust@awad-marketplace": true
   }
 }
