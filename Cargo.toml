@@ -1,6 +1,6 @@
 [package]
 name = "oil-cop"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Color-coded visibility and health monitoring for a Gas City stack (rigs, agents, bead queues)"
 license = "MIT"
