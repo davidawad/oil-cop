@@ -67,6 +67,16 @@ pub struct AgentView {
     pub session_id: Option<String>,
     pub runtime_session_name: Option<String>,
     pub current_bead: Option<BeadRef>,
+    /// Seconds since this agent's session last showed real activity (`gc
+    /// session list`'s `last_active`) -- the ground-truth "last sign it did
+    /// anything," independent of `running`/bead staleness. `None` when no
+    /// matching session (or heartbeat) was found.
+    pub last_active_secs: Option<i64>,
+    /// Last meaningful line of the agent's live pane (`gc session peek`),
+    /// when one was fetched -- proof of what it's actually doing right now,
+    /// not just that something calls it "running." `None` when no peek was
+    /// taken this render (peeking is throttled/best-effort) or none succeeded.
+    pub activity_line: Option<String>,
     pub health: Health,
 }
 
@@ -179,6 +189,29 @@ pub struct CheckIssue {
 pub struct CheckReport {
     pub ok: bool,
     pub issues: Vec<CheckIssue>,
+}
+
+/// A session `gc` itself still calls active, but whose real activity
+/// heartbeat (`last_active`) is stale (or has never fired at all) --
+/// exactly the case `gc session prune` can't reach, since prune only ever
+/// ages out sessions gc already labels suspended/asleep/drained.
+#[derive(Debug, Clone, Serialize)]
+pub struct ZombieSession {
+    pub id: String,
+    pub name: String,
+    pub rig: Option<String>,
+    /// `None` means the session has never shown any activity at all despite
+    /// gc calling it active -- arguably worse than merely stale.
+    pub last_active_secs: Option<i64>,
+    /// `gc session kill`/`gc session close` -- printed for a human to run,
+    /// never executed automatically.
+    pub suggested_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionsReport {
+    pub total_sessions: usize,
+    pub zombies: Vec<ZombieSession>,
 }
 
 #[cfg(test)]

@@ -21,6 +21,13 @@ case "$1" in
       *) echo "fake gc: unhandled 'rig $2'" >&2; exit 1 ;;
     esac
     ;;
+  session)
+    case "$2" in
+      list) cat "$DATA_DIR/gc_session_list.json" ;;
+      peek) cat "$DATA_DIR/gc_session_peek.json" ;;
+      *) echo "fake gc: unhandled 'session $2'" >&2; exit 1 ;;
+    esac
+    ;;
   *)
     echo "fake gc: unhandled subcommand '$1'" >&2
     exit 1

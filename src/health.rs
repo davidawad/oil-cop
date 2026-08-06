@@ -77,16 +77,20 @@ pub fn bead_health(status: &str, age_secs: Option<i64>, thresholds: &Thresholds)
     }
 }
 
-/// Health of an agent: suspended/dead takes priority over work-based signals.
-/// `has_fresh_work` is `None` when the agent has no assigned in-progress bead
-/// at all (idle, waiting for hooks — not necessarily a problem). A draining
-/// agent is mid-shutdown by design, so it reads as idle rather than healthy
-/// even if it's still finishing fresh work.
+/// Health of an agent: suspended/dead takes priority over activity-based
+/// signals. `last_active_secs` is the real "last sign of life" from the
+/// agent's own session (see `gc::SessionRaw::last_active`) -- how long ago
+/// it actually did something, not whether its claimed bead's timestamp looks
+/// fresh. `None` means no session heartbeat is available at all (idle,
+/// waiting for hooks -- not necessarily a problem). A draining agent is
+/// mid-shutdown by design, so it reads as idle rather than healthy even if
+/// it was recently active.
 pub fn agent_health(
     running: bool,
     suspended: bool,
     draining: bool,
-    has_fresh_work: Option<bool>,
+    last_active_secs: Option<i64>,
+    thresholds: &Thresholds,
 ) -> Health {
     if suspended {
         return Health::Suspended;
@@ -97,9 +101,9 @@ pub fn agent_health(
     if draining {
         return Health::Idle;
     }
-    match has_fresh_work {
-        Some(true) => Health::Healthy,
-        Some(false) => Health::Stale,
+    match last_active_secs {
+        Some(s) if s > thresholds.stale_after_secs => Health::Stale,
+        Some(_) => Health::Healthy,
         None => Health::Idle,
     }
 }
@@ -159,18 +163,27 @@ mod tests {
 
     #[test]
     fn agent_health_priority() {
+        let t = Thresholds {
+            stale_after_secs: 100,
+        };
         assert_eq!(
-            agent_health(true, true, false, Some(true)),
+            agent_health(true, true, false, Some(10), &t),
             Health::Suspended
         );
-        assert_eq!(agent_health(false, false, false, Some(true)), Health::Dead);
         assert_eq!(
-            agent_health(true, false, false, Some(true)),
+            agent_health(false, false, false, Some(10), &t),
+            Health::Dead
+        );
+        assert_eq!(
+            agent_health(true, false, false, Some(10), &t),
             Health::Healthy
         );
-        assert_eq!(agent_health(true, false, false, Some(false)), Health::Stale);
-        assert_eq!(agent_health(true, false, false, None), Health::Idle);
-        assert_eq!(agent_health(true, false, true, Some(true)), Health::Idle);
+        assert_eq!(
+            agent_health(true, false, false, Some(150), &t),
+            Health::Stale
+        );
+        assert_eq!(agent_health(true, false, false, None, &t), Health::Idle);
+        assert_eq!(agent_health(true, false, true, Some(10), &t), Health::Idle);
     }
 
     #[test]
@@ -246,22 +259,26 @@ mod proptests {
             running in any::<bool>(),
             suspended in any::<bool>(),
             draining in any::<bool>(),
-            has_fresh_work in prop::option::of(any::<bool>()),
+            last_active_secs in prop::option::of(any::<i64>()),
+            stale_after_secs in any::<i64>(),
         ) {
-            let h = agent_health(running, suspended, draining, has_fresh_work);
+            let t = Thresholds { stale_after_secs };
+            let h = agent_health(running, suspended, draining, last_active_secs, &t);
             if suspended {
                 prop_assert_eq!(h, Health::Suspended);
             }
         }
 
         /// Documented priority: when not suspended, `!running` always wins
-        /// (Dead), regardless of draining/has_fresh_work.
+        /// (Dead), regardless of draining/last_active_secs.
         #[test]
         fn agent_health_dead_wins_over_draining_and_work_state(
             draining in any::<bool>(),
-            has_fresh_work in prop::option::of(any::<bool>()),
+            last_active_secs in prop::option::of(any::<i64>()),
+            stale_after_secs in any::<i64>(),
         ) {
-            let h = agent_health(false, false, draining, has_fresh_work);
+            let t = Thresholds { stale_after_secs };
+            let h = agent_health(false, false, draining, last_active_secs, &t);
             prop_assert_eq!(h, Health::Dead);
         }
 

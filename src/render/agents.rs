@@ -24,7 +24,7 @@ pub fn render(
     writeln!(
         w,
         "  {:<9} {:<28} {:<11} {:<14} {:<9} WORKING ON",
-        "", "AGENT", "STATE", "BEAD", "AGE"
+        "", "AGENT", "STATE", "BEAD", "LAST SEEN"
     )?;
     for a in agents {
         let state = if a.draining {
@@ -39,9 +39,9 @@ pub fn render(
                 None => "stopped".red(),
             }
         };
-        let (bead_id, age, title): (&str, String, String) = match &a.current_bead {
-            Some(b) => (b.id.as_str(), humanize_age(b.age_secs), b.title.clone()),
-            None => ("-", "—".to_string(), String::new()),
+        let (bead_id, title): (&str, String) = match &a.current_bead {
+            Some(b) => (b.id.as_str(), b.title.clone()),
+            None => ("-", String::new()),
         };
         let title = if title.chars().count() > 50 {
             let truncated: String = title.chars().take(47).collect();
@@ -49,6 +49,11 @@ pub fn render(
         } else {
             title
         };
+        // "Last seen" is the agent's own real activity heartbeat (`gc
+        // session list`'s `last_active`), not the bead's `updated_at` --
+        // deliberately decoupled from what it's claiming to work on, so a
+        // frozen agent still reads as frozen even if the bead metadata looks
+        // fresh.
         writeln!(
             w,
             "  {} {:<28} {:<11} {:<14} {:<9} {}",
@@ -56,9 +61,14 @@ pub fn render(
             a.qualified_name,
             state,
             bead_id,
-            age,
+            humanize_age(a.last_active_secs),
             title
         )?;
+        // Proof-of-life line from `gc session peek`, when one was fetched --
+        // what the agent is actually doing right now, not an inferred status.
+        if let Some(line) = &a.activity_line {
+            writeln!(w, "  {:<9} {} {}", "", "└".dimmed(), line.dimmed())?;
+        }
     }
     writeln!(w)?;
     write!(w, "  legend:")?;
@@ -108,6 +118,8 @@ mod tests {
             session_id: None,
             runtime_session_name: None,
             current_bead,
+            last_active_secs: None,
+            activity_line: None,
             health,
         }
     }
@@ -143,15 +155,34 @@ mod tests {
             assignee: None,
             started_at: None,
             updated_at: None,
-            age_secs: Some(30),
+            age_secs: Some(9999), // bead's own age -- deliberately NOT what "last seen" shows
             health: Health::Healthy,
         };
-        let agents = [agent("nux", Health::Healthy, true, Some(bead))];
-        let out = render_to_string("luminate", &agents, false);
+        let mut a = agent("nux", Health::Healthy, true, Some(bead));
+        a.last_active_secs = Some(30);
+        let out = render_to_string("luminate", &[a], false);
         assert!(out.contains("nux"));
         assert!(out.contains("luminate-1"));
         assert!(out.contains("fix the thing"));
+        // "Last seen" comes from the agent's own real activity, not the
+        // bead's (much staler) updated_at.
         assert!(out.contains("30s ago"));
+        assert!(!out.contains("9999"));
+    }
+
+    #[test]
+    fn renders_the_activity_line_under_an_agent_when_one_was_peeked() {
+        let mut a = agent("nux", Health::Healthy, true, None);
+        a.activity_line = Some("Running 1 shell command…".to_string());
+        let out = render_to_string("luminate", &[a], false);
+        assert!(out.contains("Running 1 shell command…"));
+    }
+
+    #[test]
+    fn omits_the_activity_line_when_none_was_peeked() {
+        let agents = [agent("nux", Health::Healthy, true, None)];
+        let out = render_to_string("luminate", &agents, false);
+        assert!(!out.contains("└"));
     }
 
     #[test]

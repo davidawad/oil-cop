@@ -75,6 +75,19 @@ pub enum Command {
     /// config file's default_rig).
     Check { rig: Option<String> },
 
+    /// Scriptable zombie-session check: exits 0 if every session gc calls
+    /// active has shown real activity recently, 1 otherwise. Flags a
+    /// session gc labels active whose real heartbeat (`last_active`) is
+    /// stale or missing entirely -- the gap `gc session prune` can't reach,
+    /// since prune only ever ages out sessions already labeled
+    /// suspended/asleep/drained. Never kills or closes anything itself;
+    /// prints the `gc session kill`/`close` command for a human to run.
+    Sessions {
+        /// Only show zombies belonging to this rig (name as registered with
+        /// the city); omit to scan every rig's sessions city-wide.
+        rig: Option<String>,
+    },
+
     /// Live-refreshing dashboard: city status, plus one rig's queue/agents
     /// if given. Healthy items visibly pulse each refresh; stale/dead ones
     /// stay frozen -- motion is the health signal.

@@ -15,6 +15,18 @@ pub trait GcAdapter {
     fn status(&self, city: Option<&str>) -> Result<gc::StatusResult>;
     fn rig_list(&self, city: Option<&str>) -> Result<gc::RigListResult>;
     fn rig_status(&self, city: Option<&str>, rig: &str) -> Result<gc::RigStatusResult>;
+    /// Real per-session liveness (see `gc::SessionRaw`) -- independent of
+    /// `rig_status`'s self-reported `running` bool.
+    fn session_list(&self, city: Option<&str>) -> Result<gc::SessionListResult>;
+    /// Tail of a session's actual live pane output. Returns `Err` for a
+    /// session that isn't currently active -- callers should treat that as
+    /// "no fresh line available," not a hard failure.
+    fn session_peek(
+        &self,
+        city: Option<&str>,
+        session_id: &str,
+        lines: usize,
+    ) -> Result<gc::PeekResult>;
 }
 
 pub trait BdAdapter {
@@ -39,6 +51,17 @@ impl GcAdapter for CliGc {
     }
     fn rig_status(&self, city: Option<&str>, rig: &str) -> Result<gc::RigStatusResult> {
         Ok(gc::rig_status(city, rig)?.0)
+    }
+    fn session_list(&self, city: Option<&str>) -> Result<gc::SessionListResult> {
+        Ok(gc::session_list(city)?.0)
+    }
+    fn session_peek(
+        &self,
+        city: Option<&str>,
+        session_id: &str,
+        lines: usize,
+    ) -> Result<gc::PeekResult> {
+        Ok(gc::session_peek(city, session_id, lines)?.0)
     }
 }
 

@@ -13,6 +13,11 @@ pub struct MockGc {
     pub status: Option<gc::StatusResult>,
     pub rig_list: Option<gc::RigListResult>,
     pub rig_status: HashMap<String, gc::RigStatusResult>,
+    pub session_list: Option<gc::SessionListResult>,
+    /// Keyed by session id. Missing entries fail the same way a real peek
+    /// against an inactive session does, so callers can exercise the
+    /// "no fresh line available" path.
+    pub session_peek: HashMap<String, gc::PeekResult>,
 }
 
 impl GcAdapter for MockGc {
@@ -31,6 +36,22 @@ impl GcAdapter for MockGc {
             .get(rig)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("mock: no rig_status configured for '{rig}'"))
+    }
+    fn session_list(&self, _city: Option<&str>) -> Result<gc::SessionListResult> {
+        self.session_list
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("mock: no session_list configured"))
+    }
+    fn session_peek(
+        &self,
+        _city: Option<&str>,
+        session_id: &str,
+        _lines: usize,
+    ) -> Result<gc::PeekResult> {
+        self.session_peek
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("mock: session '{session_id}' is not active"))
     }
 }
 

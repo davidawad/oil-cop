@@ -141,6 +141,53 @@ fn agents_joins_bead_by_runtime_session_name() {
 }
 
 #[test]
+fn sessions_flags_the_stale_active_session_but_not_the_asleep_one() {
+    // Fixture: "cc-abcd" is state=active with a 2020 last_active (a zombie
+    // by definition -- gc still calls it active, but it hasn't shown real
+    // activity in years). "do-zzzz" is state=asleep with the same stale
+    // timestamp -- `gc session prune` already covers that case, so this
+    // view must NOT re-flag it. Zombies present means a nonzero exit (same
+    // scriptable contract as `check`), so this can't go through `run_json`
+    // (which asserts success) -- parse stdout directly instead.
+    let out = run(&["--json", "sessions"]);
+    assert_eq!(out.status.code(), Some(1));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stdout wasn't valid JSON: {e}\nstdout: {}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    });
+    assert_eq!(v["total_sessions"], 2);
+    let zombies = v["zombies"].as_array().expect("zombies array");
+    assert_eq!(zombies.len(), 1);
+    assert_eq!(zombies[0]["id"], "cc-abcd");
+    assert_eq!(zombies[0]["rig"], "testrig");
+    assert!(zombies[0]["suggested_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c.as_str().unwrap().contains("gc session kill cc-abcd")));
+}
+
+#[test]
+fn sessions_text_mode_exits_nonzero_and_prints_the_fix_command() {
+    let out = run(&["sessions"]);
+    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(1));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("cc-abcd"));
+    assert!(text.contains("gc session kill cc-abcd"));
+    assert!(text.contains("zombie session(s) found"));
+}
+
+#[test]
+fn sessions_rig_filter_excludes_sessions_from_other_rigs() {
+    let v = run_json(&["--json", "sessions", "not-a-real-rig"]);
+    assert_eq!(v["total_sessions"], 0);
+    assert_eq!(v["zombies"].as_array().unwrap().len(), 0);
+}
+
+#[test]
 fn dag_reports_stage_and_landed_unmerged_per_bead() {
     let v = run_json(&["--json", "dag", "testrig", "--all"]);
     let nodes = v["nodes"].as_array().expect("nodes array");

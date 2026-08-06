@@ -1,0 +1,24 @@
+{
+  "sessions": [
+    {
+      "id": "cc-abcd",
+      "name": "testrig/gastown.polecat",
+      "rig": "testrig",
+      "state": "active",
+      "last_active": "2020-01-01T00:00:00Z",
+      "attached": false,
+      "closed": false
+    },
+    {
+      "id": "do-zzzz",
+      "name": "testrig/gastown.refinery",
+      "rig": "testrig",
+      "state": "asleep",
+      "last_active": "2020-01-01T00:00:00Z",
+      "attached": false,
+      "closed": false
+    }
+  ],
+  "ok": true,
+  "schema_version": "1"
+}

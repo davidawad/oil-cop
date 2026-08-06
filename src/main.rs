@@ -96,6 +96,14 @@ fn run(cli: Cli) -> Result<()> {
             let rig = rig.clone().or_else(|| file_cfg.default_rig.clone());
             cmd_check(&adapters, city, rig.as_deref(), cli.json, &thresholds)
         }
+        Command::Sessions { rig } => {
+            // Deliberately does NOT fall back to `default_rig` like every
+            // other command here -- omitting `rig` means "scan every rig's
+            // sessions city-wide," which is the whole point (oilcop-e1c):
+            // surfacing this automatically across the city, not just the
+            // one rig a human happens to be looking at.
+            cmd_sessions(&adapters, city, rig.as_deref(), cli.json, &thresholds)
+        }
         Command::Watch { interval, rig } => {
             let rig = rig.clone().or_else(|| file_cfg.default_rig.clone());
             render::watch::run(&adapters, city, rig.as_deref(), *interval, thresholds)
@@ -165,25 +173,32 @@ fn cmd_agents(
     thresholds: &Thresholds,
 ) -> Result<()> {
     let resolved = adapters.resolve_rig(city, rig)?;
-    // bd.list and gc.rig_status hit different services entirely --
-    // independent, so fetch them concurrently. Bind the two fields (not
-    // `adapters` as a whole -- its `git` field deliberately isn't Sync).
+    // bd.list, gc.rig_status, and gc.session_list hit different services
+    // entirely -- independent, so fetch them concurrently. Bind the two
+    // `Sync` fields (not `adapters` as a whole -- its `git` field
+    // deliberately isn't Sync).
     let bd_adapter = adapters.bd.as_ref();
     let gc_adapter = adapters.gc.as_ref();
-    let (in_progress, rig_status) = std::thread::scope(|scope| {
+    let (in_progress, rig_status, session_list) = std::thread::scope(|scope| {
         let path = resolved.path.as_str();
         let list_h = scope.spawn(|| bd_adapter.list(path, "in_progress"));
         let rig_status_h = scope.spawn(|| gc_adapter.rig_status(city, rig));
+        let session_list_h = scope.spawn(|| gc_adapter.session_list(city));
         (
             list_h.join().expect("bd.list thread panicked"),
             rig_status_h.join().expect("gc.rig_status thread panicked"),
+            session_list_h
+                .join()
+                .expect("gc.session_list thread panicked"),
         )
     });
     let in_progress = in_progress?;
     let rig_status = rig_status?;
+    let session_list = session_list?;
     let now = Utc::now();
     let suspended = rig_status.rig.suspended;
-    let views = assemble::agent_views(rig_status.agents, &in_progress, now, thresholds);
+    let sessions = assemble::session_signals(&session_list, &std::collections::HashMap::new(), now);
+    let views = assemble::agent_views(rig_status.agents, &in_progress, &sessions, now, thresholds);
     if json {
         println!("{}", serde_json::to_string_pretty(&views)?);
     } else {
@@ -224,6 +239,32 @@ fn cmd_check(
         render::check::render(&report);
     }
     if !report.ok {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn cmd_sessions(
+    adapters: &Adapters,
+    city: Option<&str>,
+    rig: Option<&str>,
+    json: bool,
+    thresholds: &Thresholds,
+) -> Result<()> {
+    let mut session_list = adapters.gc.session_list(city)?;
+    if let Some(rig_name) = rig {
+        session_list
+            .sessions
+            .retain(|s| s.rig.as_deref() == Some(rig_name));
+    }
+    let now = Utc::now();
+    let report = assemble::zombie_sessions(&session_list, now, thresholds);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        write_to_stdout(|w| render::sessions::render(&report, w))?;
+    }
+    if !report.zombies.is_empty() {
         std::process::exit(1);
     }
     Ok(())
@@ -350,6 +391,8 @@ mod tests {
                 status: Some(city_status),
                 rig_list: Some(gc::RigListResult { rigs: vec![rig] }),
                 rig_status,
+                session_list: Some(gc::SessionListResult::default()),
+                session_peek: HashMap::new(),
             }),
             bd: Box::new(MockBd {
                 status: status_by_dir,
@@ -433,6 +476,8 @@ mod tests {
                 }),
                 rig_list: None,
                 rig_status: HashMap::new(),
+                session_list: None,
+                session_peek: HashMap::new(),
             }),
             bd: Box::new(MockBd::default()),
             git: Box::new(MockGit::default()),

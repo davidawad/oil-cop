@@ -7,11 +7,111 @@
 use crate::health::{self, Thresholds};
 use crate::model::{
     AgentView, BeadRef, BeadStage, CheckIssue, CheckReport, CityView, DagNode, DagView, Health,
-    QueueSummary, QueueView, RigView,
+    QueueSummary, QueueView, RigView, SessionsReport, ZombieSession,
 };
 use crate::sources::adapters::Adapters;
 use crate::sources::{bd, gc};
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
+
+/// `gc`'s zero-value RFC3339 sentinel for "never active" -- treat it as
+/// "unknown," not as an astronomically stale timestamp.
+const NEVER_ACTIVE_SENTINEL: &str = "0001-01-01T00:00:00Z";
+
+/// Real per-session liveness signal, keyed by session id -- built from `gc
+/// session list` (plus an optional, throttled `gc session peek` for a live
+/// activity line). Independent of `gc rig status`'s self-reported `running`
+/// bool, which only proves gc *thinks* the process exists.
+pub struct SessionSignal {
+    pub last_active_secs: Option<i64>,
+    pub activity_line: Option<String>,
+}
+
+/// Build the per-session signal map from a `gc session list` result and any
+/// freshly-fetched peek lines (keyed by session id; pass an empty map when
+/// none were fetched this render -- see `render::watch`, the only caller
+/// that peeks). Closed sessions are dropped entirely: a `session_id` an
+/// agent still carries from before a restart shouldn't borrow liveness off
+/// a session gc itself has already closed out.
+pub fn session_signals(
+    list: &gc::SessionListResult,
+    activity_lines: &HashMap<String, String>,
+    now: DateTime<Utc>,
+) -> HashMap<String, SessionSignal> {
+    list.sessions
+        .iter()
+        .filter(|s| !s.closed)
+        .map(|s| {
+            let last_active_secs = session_last_active_secs(s.last_active.as_deref(), now);
+            let activity_line = activity_lines.get(&s.id).cloned().map(|line| {
+                if s.attached {
+                    format!("{line} (attached)")
+                } else {
+                    line
+                }
+            });
+            (
+                s.id.clone(),
+                SessionSignal {
+                    last_active_secs,
+                    activity_line,
+                },
+            )
+        })
+        .collect()
+}
+
+fn session_last_active_secs(ts: Option<&str>, now: DateTime<Utc>) -> Option<i64> {
+    let ts = ts?;
+    if ts == NEVER_ACTIVE_SENTINEL {
+        return None;
+    }
+    health::age_secs(Some(ts), now)
+}
+
+/// Find sessions `gc` itself still calls active whose real activity
+/// heartbeat disagrees -- either stale past `thresholds.stale_after_secs`,
+/// or missing entirely despite the active claim. This is the gap `gc
+/// session prune` structurally can't close: prune only ever ages out
+/// sessions already labeled suspended/asleep/drained, never ones still
+/// called active, which is exactly the state a stuck-but-not-crashed
+/// session gets stranded in.
+pub fn zombie_sessions(
+    list: &gc::SessionListResult,
+    now: DateTime<Utc>,
+    thresholds: &Thresholds,
+) -> SessionsReport {
+    let zombies = list
+        .sessions
+        .iter()
+        .filter(|s| s.state == "active" && !s.closed)
+        .filter_map(|s| {
+            let last_active_secs = session_last_active_secs(s.last_active.as_deref(), now);
+            let is_zombie = match last_active_secs {
+                Some(secs) => secs > thresholds.stale_after_secs,
+                None => true,
+            };
+            if !is_zombie {
+                return None;
+            }
+            Some(ZombieSession {
+                id: s.id.clone(),
+                name: s.name.clone(),
+                rig: s.rig.clone(),
+                last_active_secs,
+                suggested_commands: vec![
+                    format!("gc session kill {}", s.id),
+                    format!("gc session close {}", s.id),
+                ],
+            })
+        })
+        .collect();
+
+    SessionsReport {
+        total_sessions: list.sessions.len(),
+        zombies,
+    }
+}
 
 pub fn bead_ref(raw: &bd::BeadRaw, now: DateTime<Utc>, thresholds: &Thresholds) -> BeadRef {
     let age = health::age_secs(raw.updated_at.as_deref(), now);
@@ -170,11 +270,17 @@ pub fn queue_view(
     }
 }
 
-/// Join `gc rig status` agents against in-progress beads by
-/// `assignee == runtime_session_name` to show what each agent is doing.
+/// Join `gc rig status` agents against in-progress beads (by `assignee ==
+/// runtime_session_name`, to show what each agent is doing) and against
+/// `sessions` (by `session_id`, for real liveness -- see `SessionSignal`).
+/// `sessions` may be built with an empty `activity_lines` map (no peek line,
+/// just `last_active`-based health) or omitted entirely by passing an empty
+/// `HashMap` -- every agent then falls back to `Health::Idle` rather than
+/// erroring, same as "no assigned work" always has.
 pub fn agent_views(
     agents_raw: Vec<gc::RigAgentRaw>,
     in_progress_raw: &[bd::BeadRaw],
+    sessions: &HashMap<String, SessionSignal>,
     now: DateTime<Utc>,
     thresholds: &Thresholds,
 ) -> Vec<AgentView> {
@@ -188,8 +294,16 @@ pub fn agent_views(
                     .map(|b| bead_ref(b, now, thresholds))
             });
 
-            let has_fresh_work = current_bead.as_ref().map(|b| b.health == Health::Healthy);
-            let health = health::agent_health(a.running, a.suspended, a.draining, has_fresh_work);
+            let signal = a.session_id.as_deref().and_then(|id| sessions.get(id));
+            let last_active_secs = signal.and_then(|s| s.last_active_secs);
+            let activity_line = signal.and_then(|s| s.activity_line.clone());
+            let health = health::agent_health(
+                a.running,
+                a.suspended,
+                a.draining,
+                last_active_secs,
+                thresholds,
+            );
 
             AgentView {
                 name: a.name,
@@ -202,6 +316,8 @@ pub fn agent_views(
                 session_id: a.session_id,
                 runtime_session_name: a.runtime_session_name,
                 current_bead,
+                last_active_secs,
+                activity_line,
                 health,
             }
         })
@@ -339,13 +455,16 @@ pub fn check(
         }
 
         let rig_status = adapters.gc.rig_status(city, rig_name)?;
-        let views = agent_views(rig_status.agents, &in_progress, now, thresholds);
+        let session_list = adapters.gc.session_list(city)?;
+        let sessions = session_signals(&session_list, &HashMap::new(), now);
+        let views = agent_views(rig_status.agents, &in_progress, &sessions, now, thresholds);
         for a in &views {
             if health::is_problem(a.health) {
                 let message = if a.health == Health::Dead {
                     "agent is not running".to_string()
                 } else {
-                    "agent is running but stuck on stale work".to_string()
+                    "agent is running but has shown no activity within the stale threshold"
+                        .to_string()
                 };
                 issues.push(CheckIssue {
                     scope: format!("agent:{}", a.qualified_name),
@@ -367,6 +486,7 @@ mod tests {
     use super::*;
     use crate::sources::mocks::{MockBd, MockGc, MockGit};
     use chrono::Duration;
+    use std::collections::HashMap;
 
     fn now() -> DateTime<Utc> {
         // Fixed instant (not Utc::now(), which the workflow harness forbids
@@ -599,11 +719,29 @@ mod tests {
         suspended: bool,
         draining: bool,
     ) -> gc::RigAgentRaw {
+        rig_agent_raw_with_session(
+            qualified_name,
+            runtime_session_name,
+            None,
+            running,
+            suspended,
+            draining,
+        )
+    }
+
+    fn rig_agent_raw_with_session(
+        qualified_name: &str,
+        runtime_session_name: Option<&str>,
+        session_id: Option<&str>,
+        running: bool,
+        suspended: bool,
+        draining: bool,
+    ) -> gc::RigAgentRaw {
         gc::RigAgentRaw {
             name: qualified_name.to_string(),
             qualified_name: qualified_name.to_string(),
             runtime_session_name: runtime_session_name.map(String::from),
-            session_id: None,
+            session_id: session_id.map(String::from),
             running,
             suspended,
             draining,
@@ -620,12 +758,30 @@ mod tests {
         in_progress_bead.updated_at = Some(rfc3339(n - Duration::minutes(1)));
 
         let agents = vec![
-            rig_agent_raw("rig/agent-a", Some("session-a"), true, false, false),
+            rig_agent_raw_with_session(
+                "rig/agent-a",
+                Some("session-a"),
+                Some("sess-a"),
+                true,
+                false,
+                false,
+            ),
             rig_agent_raw("rig/agent-b", Some("session-b"), true, false, false),
             rig_agent_raw("rig/agent-c", None, true, false, false),
         ];
 
-        let views = agent_views(agents, &[in_progress_bead], n, &t);
+        // Real liveness comes from the session signal, not the bead --
+        // agent-a's session was active a minute ago; agent-b has none.
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            "sess-a".to_string(),
+            SessionSignal {
+                last_active_secs: Some(60),
+                activity_line: Some("Running 1 shell command…".to_string()),
+            },
+        );
+
+        let views = agent_views(agents, &[in_progress_bead], &sessions, n, &t);
 
         let a = views
             .iter()
@@ -633,13 +789,16 @@ mod tests {
             .unwrap();
         assert_eq!(a.current_bead.as_ref().unwrap().id, "bead-1");
         assert_eq!(a.health, Health::Healthy);
+        assert_eq!(a.last_active_secs, Some(60));
+        assert_eq!(a.activity_line.as_deref(), Some("Running 1 shell command…"));
 
         let b = views
             .iter()
             .find(|v| v.qualified_name == "rig/agent-b")
             .unwrap();
         assert!(b.current_bead.is_none());
-        assert_eq!(b.health, Health::Idle); // running, no assigned work
+        assert_eq!(b.health, Health::Idle); // running, no session signal
+        assert!(b.activity_line.is_none());
 
         let c = views
             .iter()
@@ -652,10 +811,12 @@ mod tests {
     fn agent_views_health_priority_suspended_beats_dead_beats_work_state() {
         let t = thresholds();
         let n = now();
+        let sessions = HashMap::new();
 
         let dead = agent_views(
             vec![rig_agent_raw("rig/a", None, false, false, false)],
             &[],
+            &sessions,
             n,
             &t,
         );
@@ -664,6 +825,7 @@ mod tests {
         let suspended = agent_views(
             vec![rig_agent_raw("rig/a", None, false, true, false)],
             &[],
+            &sessions,
             n,
             &t,
         );
@@ -672,6 +834,7 @@ mod tests {
         let draining = agent_views(
             vec![rig_agent_raw("rig/a", None, true, false, true)],
             &[],
+            &sessions,
             n,
             &t,
         );
@@ -808,6 +971,108 @@ mod tests {
         );
     }
 
+    // -- zombie_sessions ----------------------------------------------------
+
+    fn session_raw(
+        id: &str,
+        rig: Option<&str>,
+        state: &str,
+        last_active: Option<String>,
+        closed: bool,
+    ) -> gc::SessionRaw {
+        gc::SessionRaw {
+            id: id.to_string(),
+            name: format!("agent-for-{id}"),
+            rig: rig.map(String::from),
+            state: state.to_string(),
+            last_active,
+            attached: false,
+            closed,
+        }
+    }
+
+    #[test]
+    fn zombie_sessions_flags_an_active_session_with_a_stale_heartbeat() {
+        let t = thresholds();
+        let n = now();
+        let list = gc::SessionListResult {
+            sessions: vec![session_raw(
+                "cc-1",
+                Some("luminate"),
+                "active",
+                Some(rfc3339(n - Duration::hours(2))),
+                false,
+            )],
+        };
+        let report = zombie_sessions(&list, n, &t);
+        assert_eq!(report.total_sessions, 1);
+        assert_eq!(report.zombies.len(), 1);
+        assert_eq!(report.zombies[0].id, "cc-1");
+        assert_eq!(report.zombies[0].rig.as_deref(), Some("luminate"));
+        assert!(report.zombies[0].last_active_secs.unwrap() > t.stale_after_secs);
+        assert_eq!(
+            report.zombies[0].suggested_commands,
+            vec!["gc session kill cc-1", "gc session close cc-1"]
+        );
+    }
+
+    #[test]
+    fn zombie_sessions_flags_an_active_session_that_has_never_shown_activity() {
+        let t = thresholds();
+        let n = now();
+        let list = gc::SessionListResult {
+            sessions: vec![session_raw(
+                "cc-2",
+                None,
+                "active",
+                Some("0001-01-01T00:00:00Z".to_string()), // gc's "never active" sentinel
+                false,
+            )],
+        };
+        let report = zombie_sessions(&list, n, &t);
+        assert_eq!(report.zombies.len(), 1);
+        assert!(report.zombies[0].last_active_secs.is_none());
+    }
+
+    #[test]
+    fn zombie_sessions_is_clean_for_a_fresh_active_session() {
+        let t = thresholds();
+        let n = now();
+        let list = gc::SessionListResult {
+            sessions: vec![session_raw(
+                "cc-3",
+                Some("luminate"),
+                "active",
+                Some(rfc3339(n - Duration::minutes(5))),
+                false,
+            )],
+        };
+        let report = zombie_sessions(&list, n, &t);
+        assert_eq!(report.total_sessions, 1);
+        assert!(report.zombies.is_empty());
+    }
+
+    #[test]
+    fn zombie_sessions_ignores_non_active_and_closed_sessions_regardless_of_staleness() {
+        // `gc session prune` already handles suspended/asleep/drained --
+        // this view exists specifically for the gap prune can't reach, so it
+        // must not re-flag what prune already covers, and must never flag a
+        // session gc has already closed out.
+        let t = thresholds();
+        let n = now();
+        let ancient = Some(rfc3339(n - Duration::hours(999)));
+        let list = gc::SessionListResult {
+            sessions: vec![
+                session_raw("do-suspended", None, "suspended", ancient.clone(), false),
+                session_raw("do-asleep", None, "asleep", ancient.clone(), false),
+                session_raw("do-closed", None, "active", ancient, true),
+            ],
+        };
+        let report = zombie_sessions(&list, n, &t);
+        assert_eq!(report.total_sessions, 3);
+        assert!(report.zombies.is_empty());
+    }
+
     // -- check -------------------------------------------------------------
 
     fn adapters_for_check(
@@ -836,6 +1101,8 @@ mod tests {
                         )
                     })
                     .collect(),
+                session_list: Some(gc::SessionListResult::default()),
+                session_peek: HashMap::new(),
             }),
             bd: Box::new(MockBd {
                 status: [(rig_path.clone(), bd_status)].into_iter().collect(),

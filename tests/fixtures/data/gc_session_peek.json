@@ -1,0 +1,9 @@
+{
+  "line_count": 1,
+  "lines": 6,
+  "ok": true,
+  "output": "Running 1 shell command…",
+  "schema_version": "1",
+  "session_id": "cc-abcd",
+  "target": "cc-abcd"
+}
