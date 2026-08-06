@@ -96,6 +96,14 @@ fn run(cli: Cli) -> Result<()> {
             let rig = rig.clone().or_else(|| file_cfg.default_rig.clone());
             cmd_check(&adapters, city, rig.as_deref(), cli.json, &thresholds)
         }
+        Command::HandoffGaps { rig } => {
+            // Deliberately not `rig_or_default`: unlike every other per-rig
+            // command, a bare `handoff-gaps` scans every rig in the city --
+            // see the `Command::HandoffGaps` doc comment in cli.rs. Falling
+            // back to `default_rig` here would silently narrow that to one
+            // rig, defeating the point.
+            cmd_handoff_gaps(&adapters, city, rig.as_deref(), cli.json)
+        }
         Command::Watch { interval, rig } => {
             let rig = rig.clone().or_else(|| file_cfg.default_rig.clone());
             render::watch::run(&adapters, city, rig.as_deref(), *interval, thresholds)
@@ -206,6 +214,24 @@ fn cmd_dag(
         println!("{}", serde_json::to_string_pretty(&view)?);
     } else {
         write_to_stdout(|w| render::dag::render(&view, None, w))?;
+    }
+    Ok(())
+}
+
+fn cmd_handoff_gaps(
+    adapters: &Adapters,
+    city: Option<&str>,
+    rig: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let report = assemble::handoff_gap_report(adapters, city, rig)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        write_to_stdout(|w| render::handoff::render(&report, w))?;
+    }
+    if !report.ok {
+        std::process::exit(1);
     }
     Ok(())
 }
@@ -391,6 +417,29 @@ mod tests {
         let adapters = adapters_for_rig("/fake/luminate");
         assert!(cmd_dag(&adapters, None, "luminate", false, true).is_ok());
         assert!(cmd_dag(&adapters, None, "luminate", true, false).is_ok());
+    }
+
+    #[test]
+    fn cmd_handoff_gaps_succeeds_for_a_known_rig_and_errors_for_an_unknown_one() {
+        // Only the "no gaps found" path is exercised in-process -- like
+        // cmd_check, the failure path calls std::process::exit(1) directly,
+        // which would kill the whole test binary. That path is covered by
+        // e2e tests instead. adapters_for_rig's MockGit has no
+        // default_branch configured, so base_branch comes back None and
+        // gaps stay empty either way -- this only proves the plumbing
+        // (rig resolution, both output modes) works end to end.
+        colored::control::set_override(false);
+        let adapters = adapters_for_rig("/fake/luminate");
+        assert!(cmd_handoff_gaps(&adapters, None, Some("luminate"), true).is_ok());
+        assert!(cmd_handoff_gaps(&adapters, None, Some("luminate"), false).is_ok());
+        assert!(cmd_handoff_gaps(&adapters, None, Some("not-a-real-rig"), true).is_err());
+    }
+
+    #[test]
+    fn cmd_handoff_gaps_with_no_rig_scans_every_rig_in_the_city() {
+        colored::control::set_override(false);
+        let adapters = adapters_for_rig("/fake/luminate");
+        assert!(cmd_handoff_gaps(&adapters, None, None, true).is_ok());
     }
 
     #[test]

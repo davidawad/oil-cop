@@ -65,6 +65,24 @@ pub enum Command {
         all: bool,
     },
 
+    /// Cross-rig handoff-gap check (oilcop-kef): flags `polecat/<bead-id>`
+    /// branches on origin with real, unmerged, pushed commits whose bead is
+    /// nonetheless pending (open/blocked/deferred) and unassigned in bd --
+    /// the signature of a polecat session that pushed finished work, then
+    /// died before it could update bd and hand the bead to the refinery.
+    /// A dedicated command rather than folding into `check`/`watch`: this
+    /// is a rig-wide git+bd cross-reference (enumerate every polecat
+    /// branch on origin, not just one bead's), and unlike every other
+    /// per-rig command here, omitting `rig` means "scan every rig,"
+    /// not "use the configured default" -- surfacing this gap across the
+    /// whole city without being told where to look is the entire point
+    /// (see `assemble::handoff_gap_report`'s doc comment).
+    HandoffGaps {
+        /// Rig name (as registered with the city) or a filesystem path.
+        /// Omitted: scan every non-suspended rig in the city.
+        rig: Option<String>,
+    },
+
     /// Generate shell completions (bash/zsh/fish/elvish/powershell) and
     /// print them to stdout.
     Completion { shell: Shell },

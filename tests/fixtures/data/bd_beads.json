@@ -60,5 +60,17 @@
     "parent": null,
     "dependencies": [],
     "metadata": {"branch": "polecat/test-5-landed", "gc.work_branch": "master"}
+  },
+  {
+    "id": "test-6-orphaned",
+    "title": "An open, unassigned bead behind a real unmerged pushed branch",
+    "status": "open",
+    "priority": 1,
+    "assignee": null,
+    "updated_at": "2020-01-01T00:00:00Z",
+    "started_at": null,
+    "parent": null,
+    "dependencies": [],
+    "metadata": {}
   }
 ]

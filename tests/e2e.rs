@@ -48,6 +48,21 @@ fn run(args: &[&str]) -> Output {
         .expect("failed to spawn oil-cop binary")
 }
 
+/// Same as `run_json`, but for commands like `handoff-gaps`/`check` that
+/// deliberately exit nonzero (a scriptable "problems found" signal) while
+/// still printing valid JSON to stdout -- callers that expect that shape
+/// assert on the exit code themselves instead of this helper doing it.
+fn run_json_regardless_of_exit_code(args: &[&str]) -> Value {
+    let out = run(args);
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stdout wasn't valid JSON: {e}\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    })
+}
+
 fn run_json(args: &[&str]) -> Value {
     let out = run(args);
     assert!(
@@ -144,7 +159,7 @@ fn agents_joins_bead_by_runtime_session_name() {
 fn dag_reports_stage_and_landed_unmerged_per_bead() {
     let v = run_json(&["--json", "dag", "testrig", "--all"]);
     let nodes = v["nodes"].as_array().expect("nodes array");
-    assert_eq!(nodes.len(), 5);
+    assert_eq!(nodes.len(), 6);
 
     let by_id = |id: &str| {
         nodes
@@ -212,6 +227,65 @@ fn check_city_wide_only_is_clean_with_no_rig_given() {
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("all clear"));
+}
+
+#[test]
+fn handoff_gaps_flags_orphaned_and_ghost_branches_but_not_active_or_landed_ones() {
+    // The fake git's for-each-ref returns four canned polecat/* branches for
+    // testrig: polecat/test-1 (bd bead in_progress+assigned -- normal, not
+    // a gap), polecat/test-5-landed (already merged per the fake
+    // merge-base -- not a gap), polecat/test-6-orphaned (bd bead open,
+    // unassigned -- IS a gap), and polecat/test-7-ghost (no matching bd
+    // bead at all -- also a gap). This is the oilcop-kef detection logic
+    // end to end against the compiled binary.
+    let v = run_json_regardless_of_exit_code(&["--json", "handoff-gaps", "testrig"]);
+    let rigs = v["rigs"].as_array().expect("rigs array");
+    assert_eq!(rigs.len(), 1);
+    let rig = &rigs[0];
+    assert_eq!(rig["rig_name"], "testrig");
+    assert_eq!(rig["base_branch"], "master");
+
+    let gaps = rig["gaps"].as_array().expect("gaps array");
+    let by_bead_id = |id: &str| gaps.iter().find(|g| g["bead_id"] == id);
+
+    assert!(by_bead_id("test-1").is_none());
+    assert!(by_bead_id("test-5-landed").is_none());
+
+    let orphaned = by_bead_id("test-6-orphaned").expect("test-6-orphaned flagged as a gap");
+    assert_eq!(orphaned["branch"], "polecat/test-6-orphaned");
+    assert_eq!(orphaned["bead_status"], "open");
+    assert!(orphaned["bead_assignee"].is_null());
+
+    let ghost = by_bead_id("test-7-ghost").expect("test-7-ghost flagged as a gap");
+    assert!(
+        ghost["bead_status"].is_null(),
+        "a branch with no matching bd record must report a null bead_status"
+    );
+
+    assert_eq!(v["ok"], false);
+}
+
+#[test]
+fn handoff_gaps_exits_nonzero_and_prints_a_summary_in_text_mode_when_gaps_exist() {
+    let out = run(&["handoff-gaps", "testrig"]);
+    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(1));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("testrig"));
+    assert!(text.contains("test-6-orphaned"));
+    assert!(text.contains("test-7-ghost"));
+    assert!(text.contains("handoff gap(s) found"));
+}
+
+#[test]
+fn handoff_gaps_with_no_rig_scans_every_non_suspended_rig_in_the_city() {
+    // gc_rig_list.json has two rigs: testrig (active) and sleepyrig
+    // (suspended). Omitting the rig argument must scan every non-suspended
+    // one automatically -- sleepyrig must not show up at all.
+    let v = run_json_regardless_of_exit_code(&["--json", "handoff-gaps"]);
+    let rigs = v["rigs"].as_array().expect("rigs array");
+    assert_eq!(rigs.len(), 1, "suspended rigs must be skipped");
+    assert_eq!(rigs[0]["rig_name"], "testrig");
 }
 
 #[test]

@@ -76,6 +76,75 @@ impl LocalGit {
             .args(["-C", repo_dir, "fetch", "--quiet", "origin"])
             .output();
     }
+
+    /// All `origin/<prefix>*` branch names at `repo_dir` -- bare (no
+    /// `origin/` prefix), the same shape `is_merged`'s `branch` argument
+    /// expects. Enumerates straight from `refs/remotes/origin/*`
+    /// deliberately, not from any bd bead metadata: this is the first half
+    /// of the oilcop-kef handoff-gap check (see
+    /// `assemble::rig_handoff_gaps`), whose whole premise is that a bead's
+    /// bd record can be silently wrong about what's actually on origin --
+    /// so bd can't be the source of truth for "what branches exist" here.
+    /// Empty on any failure (no network, no matching branches, not a git
+    /// repo at all) -- same lenient "unknown means nothing found" fold as
+    /// `is_merged`.
+    pub fn remote_branches(&self, repo_dir: &str, prefix: &str) -> Vec<String> {
+        self.fetch_throttled(repo_dir);
+        let pattern = format!("refs/remotes/origin/{prefix}");
+        let out = std::process::Command::new("git")
+            .args([
+                "-C",
+                repo_dir,
+                "for-each-ref",
+                "--format=%(refname)",
+                &pattern,
+            ])
+            .output();
+        let Ok(out) = out else {
+            return Vec::new();
+        };
+        if !out.status.success() {
+            return Vec::new();
+        }
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| line.strip_prefix("refs/remotes/origin/"))
+            .map(String::from)
+            .collect()
+    }
+
+    /// `origin`'s default branch (its remote `HEAD`) -- the rig's base
+    /// branch for the handoff-gap check. Read from the local
+    /// `refs/remotes/origin/HEAD` symbolic ref that `git clone` (or `git
+    /// remote set-head`) sets up, not from any bead's `gc.work_branch`
+    /// metadata: same reasoning as `remote_branches` -- the whole point of
+    /// this check is beads whose bd metadata may never have finished
+    /// writing, so metadata can't be trusted as the source of truth for
+    /// what a rig's beads are even supposed to land on. `None` if that ref
+    /// was never set up (an unusual clone, or a bare `git init` with a
+    /// manually added remote) -- callers treat that as "can't determine
+    /// this rig's base branch, skip the check" rather than guessing "main"
+    /// vs "master".
+    pub fn default_branch(&self, repo_dir: &str) -> Option<String> {
+        self.fetch_throttled(repo_dir);
+        let out = std::process::Command::new("git")
+            .args([
+                "-C",
+                repo_dir,
+                "symbolic-ref",
+                "--short",
+                "refs/remotes/origin/HEAD",
+            ])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .strip_prefix("origin/")
+            .map(String::from)
+    }
 }
 
 fn is_ancestor(repo_dir: &str, ancestor: &str, descendant: &str) -> anyhow::Result<bool> {
@@ -150,8 +219,7 @@ mod tests {
                 work.to_str().unwrap(),
             ],
         );
-        git_cmd(&work, &["config", "user.email", "test@example.com"]);
-        git_cmd(&work, &["config", "user.name", "Test"]);
+        configure_test_identity(&work);
         git_cmd(&work, &["checkout", "--quiet", "-b", "main"]);
         std::fs::write(work.join("README.md"), "initial\n").unwrap();
         git_cmd(&work, &["add", "."]);
@@ -159,6 +227,22 @@ mod tests {
         git_cmd(&work, &["push", "--quiet", "-u", "origin", "main"]);
 
         tmp
+    }
+
+    /// `user.name`/`user.email`, plus `commit.gpgsign false` -- scoped to
+    /// this one throwaway repo via plain (non-`--global`) `git config`, so
+    /// it never touches the real machine's git config. Without it, these
+    /// tests inherit whatever global `commit.gpgsign` the machine running
+    /// them happens to have set; on a machine where that's `true`, running
+    /// several of these real-repo tests in parallel (`cargo test`'s
+    /// default) can pile enough concurrent `gpg`/`pinentry` invocations
+    /// onto a resource-constrained sandbox to make one fail with "Cannot
+    /// allocate memory" -- a real signing tool running out of headroom, not
+    /// a bug in the ancestry check these tests exist to verify.
+    fn configure_test_identity(dir: &std::path::Path) {
+        git_cmd(dir, &["config", "user.email", "test@example.com"]);
+        git_cmd(dir, &["config", "user.name", "Test"]);
+        git_cmd(dir, &["config", "commit.gpgsign", "false"]);
     }
 
     #[test]
@@ -212,5 +296,129 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let git = LocalGit::default();
         assert!(!git.is_merged(tmp.path().to_str().unwrap(), "any-branch", "main"));
+    }
+
+    // -- remote_branches / default_branch, oilcop-kef's handoff-gap check --
+
+    #[test]
+    fn remote_branches_lists_only_branches_under_the_given_prefix() {
+        let tmp = setup_repo_with_origin();
+        let work = tmp.path().join("work");
+
+        git_cmd(&work, &["branch", "polecat/gap-1"]);
+        git_cmd(&work, &["branch", "polecat/gap-2"]);
+        git_cmd(&work, &["branch", "not-polecat/other"]);
+        git_cmd(
+            &work,
+            &[
+                "push",
+                "--quiet",
+                "origin",
+                "polecat/gap-1",
+                "polecat/gap-2",
+                "not-polecat/other",
+            ],
+        );
+
+        let git = LocalGit::default();
+        let mut branches = git.remote_branches(work.to_str().unwrap(), "polecat/");
+        branches.sort();
+        assert_eq!(branches, vec!["polecat/gap-1", "polecat/gap-2"]);
+    }
+
+    #[test]
+    fn remote_branches_is_empty_when_nothing_matches_or_repo_is_missing() {
+        let tmp = setup_repo_with_origin();
+        let work = tmp.path().join("work");
+        let git = LocalGit::default();
+        assert!(git
+            .remote_branches(work.to_str().unwrap(), "polecat/")
+            .is_empty());
+
+        let not_a_repo = tempfile::tempdir().expect("tempdir");
+        assert!(git
+            .remote_branches(not_a_repo.path().to_str().unwrap(), "polecat/")
+            .is_empty());
+    }
+
+    /// A bare "origin" repo whose `HEAD` is explicitly pointed at `main`
+    /// *before* it has any commits, seeded via a throwaway clone, then
+    /// cloned again for the real `work` tree under test -- so `work`'s
+    /// `refs/remotes/origin/HEAD` comes back correctly populated, exactly
+    /// like a real, already-established Gas City rig clone. (Cloning an
+    /// empty bare repo -- what `setup_repo_with_origin` does, since it only
+    /// needs to test `is_merged` -- leaves that symref unset; see
+    /// `default_branch_is_none_when_origin_head_was_never_set` below, which
+    /// relies on exactly that gap.)
+    fn setup_repo_with_origin_head_set() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare = tmp.path().join("origin.git");
+        let seed = tmp.path().join("seed");
+        let work = tmp.path().join("work");
+
+        git_cmd(tmp.path(), &["init", "--quiet", "--bare", "origin.git"]);
+        git_cmd(&bare, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        git_cmd(
+            tmp.path(),
+            &[
+                "clone",
+                "--quiet",
+                bare.to_str().unwrap(),
+                seed.to_str().unwrap(),
+            ],
+        );
+        configure_test_identity(&seed);
+        git_cmd(&seed, &["checkout", "--quiet", "-b", "main"]);
+        std::fs::write(seed.join("README.md"), "initial\n").unwrap();
+        git_cmd(&seed, &["add", "."]);
+        git_cmd(&seed, &["commit", "--quiet", "-m", "initial"]);
+        git_cmd(&seed, &["push", "--quiet", "-u", "origin", "main"]);
+
+        git_cmd(
+            tmp.path(),
+            &[
+                "clone",
+                "--quiet",
+                bare.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ],
+        );
+
+        tmp
+    }
+
+    #[test]
+    fn default_branch_reads_origins_head_from_a_properly_cloned_repo() {
+        let tmp = setup_repo_with_origin_head_set();
+        let work = tmp.path().join("work");
+
+        let git = LocalGit::default();
+        assert_eq!(
+            git.default_branch(work.to_str().unwrap()),
+            Some("main".to_string())
+        );
+    }
+
+    #[test]
+    fn default_branch_is_none_when_origin_head_was_never_set() {
+        // setup_repo_with_origin clones an *empty* bare repo, then pushes
+        // "main" afterwards -- at clone time there was nothing for git to
+        // advertise a HEAD for, so refs/remotes/origin/HEAD never gets
+        // created locally. Real Gas City rigs never look like this (they're
+        // cloned from a remote that already has history), but it's exactly
+        // the "can't determine it" case default_branch must fold to None
+        // instead of guessing.
+        let tmp = setup_repo_with_origin();
+        let work = tmp.path().join("work");
+
+        let git = LocalGit::default();
+        assert_eq!(git.default_branch(work.to_str().unwrap()), None);
+    }
+
+    #[test]
+    fn default_branch_is_none_when_repo_dir_is_not_a_git_repo_at_all() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let git = LocalGit::default();
+        assert_eq!(git.default_branch(tmp.path().to_str().unwrap()), None);
     }
 }

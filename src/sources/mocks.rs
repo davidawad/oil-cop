@@ -65,6 +65,13 @@ pub struct MockGit {
     /// merged) for any combination not explicitly configured, same as the
     /// real LocalGit's lenient "unknown means not landed" behavior.
     pub merged: HashMap<(String, String, String), bool>,
+    /// Keyed by (repo_dir, prefix) -- returns an empty vec (no matching
+    /// branches) for any combination not explicitly configured, same as the
+    /// real LocalGit's lenient "unknown means nothing found" behavior.
+    pub remote_branches: HashMap<(String, String), Vec<String>>,
+    /// Keyed by repo_dir -- returns `None` (base branch undetermined) for
+    /// any repo not explicitly configured.
+    pub default_branch: HashMap<String, String>,
 }
 
 impl GitAdapter for MockGit {
@@ -77,5 +84,16 @@ impl GitAdapter for MockGit {
             ))
             .copied()
             .unwrap_or(false)
+    }
+
+    fn remote_branches(&self, repo_dir: &str, prefix: &str) -> Vec<String> {
+        self.remote_branches
+            .get(&(repo_dir.to_string(), prefix.to_string()))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn default_branch(&self, repo_dir: &str) -> Option<String> {
+        self.default_branch.get(repo_dir).cloned()
     }
 }

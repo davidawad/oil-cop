@@ -26,6 +26,20 @@ pub trait GitAdapter {
     /// Has `branch` already landed (merged into) `target_branch`, in the
     /// working tree at `repo_dir`?
     fn is_merged(&self, repo_dir: &str, branch: &str, target_branch: &str) -> bool;
+
+    /// All `origin/<prefix>*` branch names in the working tree at
+    /// `repo_dir`, bare (no `origin/` prefix). Feeds oilcop-kef's
+    /// handoff-gap check (`assemble::rig_handoff_gaps`): enumerating
+    /// straight from git, not from any bead's `branch` metadata, since that
+    /// metadata is exactly what can be missing/stale in the failure mode
+    /// this check exists to catch.
+    fn remote_branches(&self, repo_dir: &str, prefix: &str) -> Vec<String>;
+
+    /// `origin`'s default branch (its remote `HEAD`) at `repo_dir`, or
+    /// `None` if it can't be determined. The handoff-gap check's "base
+    /// branch" -- sourced from git itself rather than a bead's
+    /// `gc.work_branch` metadata, for the same reason as `remote_branches`.
+    fn default_branch(&self, repo_dir: &str) -> Option<String>;
 }
 
 pub struct CliGc;
@@ -56,6 +70,12 @@ impl BdAdapter for CliBd {
 impl GitAdapter for git::LocalGit {
     fn is_merged(&self, repo_dir: &str, branch: &str, target_branch: &str) -> bool {
         git::LocalGit::is_merged(self, repo_dir, branch, target_branch)
+    }
+    fn remote_branches(&self, repo_dir: &str, prefix: &str) -> Vec<String> {
+        git::LocalGit::remote_branches(self, repo_dir, prefix)
+    }
+    fn default_branch(&self, repo_dir: &str) -> Option<String> {
+        git::LocalGit::default_branch(self, repo_dir)
     }
 }
 

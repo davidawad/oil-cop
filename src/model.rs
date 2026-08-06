@@ -139,6 +139,20 @@ pub enum BeadStage {
     Merged,
 }
 
+impl BeadStage {
+    /// Classify a raw bd status string into this three-bucket pipeline
+    /// stage. Shared by `assemble::dag_view_from_beads` (the DAG render)
+    /// and `assemble::rig_handoff_gaps` (oilcop-kef) -- both need "where is
+    /// this bead in the pipeline," not just the DAG.
+    pub fn from_status(status: &str) -> Self {
+        match status {
+            "closed" => BeadStage::Merged,
+            "in_progress" => BeadStage::Active,
+            _ => BeadStage::Pending,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DagNode {
     pub id: String,
@@ -161,6 +175,52 @@ pub struct DagView {
     pub rig_name: String,
     pub rig_path: String,
     pub nodes: Vec<DagNode>,
+}
+
+/// One `polecat/<bead-id>` branch on origin with real, unmerged commits
+/// whose bead is nonetheless pending (open/blocked/deferred) and
+/// unassigned -- or missing from bd entirely -- the oilcop-kef
+/// "handoff gap" signal. See `assemble::rig_handoff_gaps` for the
+/// detection logic and the incident this exists to catch: a polecat
+/// session pushes real work to origin, then gets killed/recycled before it
+/// can update bd metadata and reassign the bead to the refinery, leaving
+/// finished work stranded and invisible.
+#[derive(Debug, Clone, Serialize)]
+pub struct HandoffGap {
+    pub bead_id: String,
+    pub branch: String,
+    /// `None` when bd has no record of this bead id at all -- a more
+    /// severe version of the same gap (see `assemble::rig_handoff_gaps`).
+    pub bead_status: Option<String>,
+    pub bead_assignee: Option<String>,
+}
+
+/// One rig's handoff-gap scan result.
+#[derive(Debug, Clone, Serialize)]
+pub struct RigHandoffGaps {
+    pub rig_name: String,
+    pub rig_path: String,
+    /// Origin's default branch, used as the "landed into" target for the
+    /// unmerged check. `None` means it couldn't be determined (e.g. this
+    /// rig's clone never got an `origin/HEAD` symref set up) -- `gaps` is
+    /// then always empty, which must be read as "couldn't check," not a
+    /// confirmed "no gaps."
+    pub base_branch: Option<String>,
+    pub gaps: Vec<HandoffGap>,
+    /// Set instead of a trustworthy `gaps` if this rig's bd bead list
+    /// couldn't be fetched at all.
+    pub error: Option<String>,
+}
+
+/// City-wide (or single-rig) handoff-gap report -- see
+/// `assemble::handoff_gap_report`.
+#[derive(Debug, Clone, Serialize)]
+pub struct HandoffGapReport {
+    pub rigs: Vec<RigHandoffGaps>,
+    /// True iff no rig reported any gaps. A rig-level fetch `error` doesn't
+    /// by itself flip this to false -- that's "couldn't check," a
+    /// different signal than a confirmed gap; see `RigHandoffGaps::error`.
+    pub ok: bool,
 }
 
 /// One concrete problem found by `oil-cop check` -- only `Dead`/`Stale`
@@ -204,5 +264,18 @@ mod tests {
         );
         assert_eq!(Health::Healthy.label(), "healthy");
         assert_eq!(Health::Unknown.label(), "unknown");
+    }
+
+    #[test]
+    fn bead_stage_from_status_classifies_known_and_unknown_statuses() {
+        assert_eq!(BeadStage::from_status("closed"), BeadStage::Merged);
+        assert_eq!(BeadStage::from_status("in_progress"), BeadStage::Active);
+        assert_eq!(BeadStage::from_status("open"), BeadStage::Pending);
+        assert_eq!(BeadStage::from_status("blocked"), BeadStage::Pending);
+        assert_eq!(BeadStage::from_status("deferred"), BeadStage::Pending);
+        // Anything unrecognized falls back to Pending rather than panicking
+        // or silently dropping the bead -- same lenient fold `dag_view`
+        // relied on before this was extracted.
+        assert_eq!(BeadStage::from_status("something-new"), BeadStage::Pending);
     }
 }

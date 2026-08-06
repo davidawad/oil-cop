@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # Fake `git` for e2e tests. oil-cop's GitAdapter always calls this in one of
-# two fixed shapes: `-C <dir> fetch --quiet origin` (no-op success) or
-# `-C <dir> merge-base --is-ancestor <ancestor-ref> <descendant-ref>` (exit
-# 0 = merged). We fake "merged" by whether the ancestor ref name contains
-# "landed" -- lets fixtures encode both outcomes without a real repo.
+# four fixed shapes:
+#   `-C <dir> fetch --quiet origin`                                (no-op success)
+#   `-C <dir> merge-base --is-ancestor <ancestor-ref> <descendant-ref>`
+#       (exit 0 = merged; faked by whether the ancestor ref name contains
+#       "landed", so fixtures can encode both outcomes without a real repo)
+#   `-C <dir> for-each-ref --format=%(refname) refs/remotes/origin/<prefix>`
+#       (oilcop-kef's handoff-gap check enumerating polecat/* branches)
+#   `-C <dir> symbolic-ref --short refs/remotes/origin/HEAD`
+#       (oilcop-kef's handoff-gap check resolving the rig's base branch)
 if [[ "$3" == "fetch" ]]; then
   exit 0
 fi
@@ -12,6 +17,28 @@ if [[ "$3" == "merge-base" ]]; then
     *landed*) exit 0 ;;
     *) exit 1 ;;
   esac
+fi
+if [[ "$3" == "for-each-ref" ]]; then
+  # $5 is the ref pattern, e.g. "refs/remotes/origin/polecat/". Canned
+  # branches: test-1 (in_progress+assigned, not a gap), test-5-landed
+  # (already merged per the merge-base fake above, not a gap),
+  # test-6-orphaned (open+unassigned bead exists -- IS a gap), and
+  # test-7-ghost (no matching bd bead at all -- also a gap).
+  case "$5" in
+    refs/remotes/origin/polecat/*)
+      cat <<'EOF'
+refs/remotes/origin/polecat/test-1
+refs/remotes/origin/polecat/test-5-landed
+refs/remotes/origin/polecat/test-6-orphaned
+refs/remotes/origin/polecat/test-7-ghost
+EOF
+      ;;
+  esac
+  exit 0
+fi
+if [[ "$3" == "symbolic-ref" ]]; then
+  echo "origin/master"
+  exit 0
 fi
 echo "fake git: unhandled invocation: $*" >&2
 exit 1

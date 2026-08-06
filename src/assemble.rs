@@ -6,8 +6,8 @@
 
 use crate::health::{self, Thresholds};
 use crate::model::{
-    AgentView, BeadRef, BeadStage, CheckIssue, CheckReport, CityView, DagNode, DagView, Health,
-    QueueSummary, QueueView, RigView,
+    AgentView, BeadRef, BeadStage, CheckIssue, CheckReport, CityView, DagNode, DagView, HandoffGap,
+    HandoffGapReport, Health, QueueSummary, QueueView, RigHandoffGaps, RigView,
 };
 use crate::sources::adapters::Adapters;
 use crate::sources::{bd, gc};
@@ -242,11 +242,7 @@ pub fn dag_view_from_beads(
         .iter()
         .map(|b| {
             let age = health::age_secs(b.updated_at.as_deref(), now);
-            let stage = match b.status.as_str() {
-                "closed" => BeadStage::Merged,
-                "in_progress" => BeadStage::Active,
-                _ => BeadStage::Pending,
-            };
+            let stage = BeadStage::from_status(&b.status);
             let landed_unmerged = stage == BeadStage::Active
                 && match (b.branch(), b.work_branch()) {
                     (Some(branch), Some(target)) => {
@@ -278,6 +274,136 @@ pub fn dag_view_from_beads(
 
 const ALL_STATUSES_NON_CLOSED: &str = "open,in_progress,blocked,deferred";
 const ALL_STATUSES_INCL_CLOSED: &str = "open,in_progress,blocked,deferred,closed";
+
+/// Prefix Gas Town's polecat automation uses for its per-bead work branches
+/// (`polecat/<bead-id>`) -- the naming convention `rig_handoff_gaps`
+/// depends on to recover a bead id from a bare branch name.
+const POLECAT_BRANCH_PREFIX: &str = "polecat/";
+
+/// Cross-reference one rig's `polecat/*` branches on origin against bd's
+/// view of the beads behind them -- the oilcop-kef detection logic.
+///
+/// Real incident: a Gas Town polecat session pushes a `polecat/<bead-id>`
+/// branch with finished work to origin, then updates bd metadata, then
+/// reassigns the bead to the refinery for merge -- as three separate,
+/// independently-interruptible steps (`mol-polecat-work.toml`'s
+/// `submit-and-exit`). If the session dies between the push and the bd
+/// update, the branch survives safely on origin but the bead reverts to
+/// open/unassigned in bd with no signal anything is wrong. It happened for
+/// real for four beads on the "luminate" rig and cost hours of git-reflog/
+/// JSONL-log forensics to diagnose, because no tool could directly answer
+/// "does this bead's bd status agree with what's actually on origin for
+/// its branch."
+///
+/// Deliberately enumerates branches from git (`GitAdapter::remote_branches`),
+/// not from any bead's `branch` metadata field -- the whole point is beads
+/// whose bd metadata may itself be incomplete or stale, so bd can't be the
+/// source of truth for "what branches exist on origin." Same reasoning for
+/// the base branch: sourced from origin's own default branch
+/// (`GitAdapter::default_branch`), not a bead's `gc.work_branch` metadata.
+///
+/// "Pending and unassigned" reuses `BeadStage::Pending` (open/blocked/
+/// deferred) rather than checking `status == "open"` specifically -- the
+/// ticket's "open/unassigned" describes the incident's actual beads, but
+/// the underlying failure (bd never heard about real, unmerged, pushed
+/// work) looks identical whether the bead is sitting open, blocked, or
+/// deferred. A bead with no bd record at all behind a real pushed branch
+/// gets flagged too -- a more severe version of the same gap, not a
+/// different case.
+fn rig_handoff_gaps(
+    adapters: &Adapters,
+    rig: &gc::RigRaw,
+    beads: &[bd::BeadRaw],
+) -> RigHandoffGaps {
+    let base_branch = adapters.git.default_branch(&rig.path);
+    let gaps = match &base_branch {
+        None => Vec::new(),
+        Some(base) => adapters
+            .git
+            .remote_branches(&rig.path, POLECAT_BRANCH_PREFIX)
+            .into_iter()
+            .filter_map(|branch| {
+                let bead_id = branch.strip_prefix(POLECAT_BRANCH_PREFIX)?.to_string();
+                if adapters.git.is_merged(&rig.path, &branch, base) {
+                    return None; // already landed on base -- not a gap
+                }
+                let bead = beads.iter().find(|b| b.id == bead_id);
+                let is_gap = match bead {
+                    Some(b) => {
+                        BeadStage::from_status(&b.status) == BeadStage::Pending
+                            && b.assignee.is_none()
+                    }
+                    None => true,
+                };
+                is_gap.then(|| HandoffGap {
+                    bead_id: bead_id.clone(),
+                    branch: branch.clone(),
+                    bead_status: bead.map(|b| b.status.clone()),
+                    bead_assignee: bead.and_then(|b| b.assignee.clone()),
+                })
+            })
+            .collect(),
+    };
+
+    RigHandoffGaps {
+        rig_name: rig.name.clone(),
+        rig_path: rig.path.clone(),
+        base_branch,
+        gaps,
+        error: None,
+    }
+}
+
+/// City-wide (or single-rig, if `rig` is given) handoff-gap scan -- see
+/// `rig_handoff_gaps` for the detection logic. Unlike `check`, whose
+/// rig-less call only checks city-wide signals, a rig-less call here scans
+/// every non-suspended rig by default: oilcop-kef's whole ask is that this
+/// surfaces automatically across every rig oil-cop watches, without
+/// needing to be told which one to look at.
+///
+/// A rig whose `bd list` call fails doesn't abort the whole report -- its
+/// `RigHandoffGaps::error` is set and the rest of the city's rigs still get
+/// checked, the same tolerate-and-continue shape `city_view` uses for its
+/// per-rig bead summaries. Fetched sequentially, not concurrently like
+/// `city_view`'s per-rig `bd.status` calls: each rig here also needs
+/// several `adapters.git` calls, and `Adapters::git` is deliberately not
+/// `Sync` (see `Adapters`' doc comment), so there's no safe way to spread
+/// this loop across threads without restructuring that.
+pub fn handoff_gap_report(
+    adapters: &Adapters,
+    city: Option<&str>,
+    rig: Option<&str>,
+) -> anyhow::Result<HandoffGapReport> {
+    let rigs: Vec<gc::RigRaw> = match rig {
+        Some(name) => vec![adapters.resolve_rig(city, name)?],
+        None => adapters
+            .gc
+            .rig_list(city)?
+            .rigs
+            .into_iter()
+            .filter(|r| !r.suspended)
+            .collect(),
+    };
+
+    let rigs: Vec<RigHandoffGaps> = rigs
+        .iter()
+        .map(
+            |rig| match adapters.bd.list(&rig.path, ALL_STATUSES_INCL_CLOSED) {
+                Ok(beads) => rig_handoff_gaps(adapters, rig, &beads),
+                Err(e) => RigHandoffGaps {
+                    rig_name: rig.name.clone(),
+                    rig_path: rig.path.clone(),
+                    base_branch: None,
+                    gaps: vec![],
+                    error: Some(e.to_string()),
+                },
+            },
+        )
+        .collect();
+
+    let ok = rigs.iter().all(|r| r.gaps.is_empty());
+    Ok(HandoffGapReport { rigs, ok })
+}
 
 /// Health-check verdict: city-wide signals always, plus one rig's
 /// in-progress beads and agents if given. Only `Dead`/`Stale` count as
@@ -805,6 +931,275 @@ mod tests {
         assert!(
             !by_id("direct-commit-1").landed_unmerged,
             "no branch metadata (direct-commit model) must never claim landed_unmerged"
+        );
+    }
+
+    // -- rig_handoff_gaps / handoff_gap_report ----------------------------
+
+    fn adapters_for_handoff(
+        rigs: Vec<gc::RigRaw>,
+        beads_by_dir: Vec<(&str, Vec<bd::BeadRaw>)>,
+        git: MockGit,
+    ) -> Adapters {
+        let mut list = std::collections::HashMap::new();
+        for (dir, beads) in beads_by_dir {
+            list.insert(
+                (dir.to_string(), ALL_STATUSES_INCL_CLOSED.to_string()),
+                beads,
+            );
+        }
+        Adapters {
+            gc: Box::new(MockGc {
+                rig_list: Some(gc::RigListResult { rigs: rigs.clone() }),
+                rig_status: rigs
+                    .into_iter()
+                    .map(|r| {
+                        (
+                            r.name.clone(),
+                            gc::RigStatusResult {
+                                agents: vec![],
+                                rig: r,
+                            },
+                        )
+                    })
+                    .collect(),
+                ..Default::default()
+            }),
+            bd: Box::new(MockBd {
+                list,
+                ..Default::default()
+            }),
+            git: Box::new(git),
+        }
+    }
+
+    fn git_with(
+        default_branch: Vec<(&str, &str)>,
+        remote_branches: Vec<((&str, &str), Vec<&str>)>,
+        merged: Vec<((&str, &str, &str), bool)>,
+    ) -> MockGit {
+        MockGit {
+            default_branch: default_branch
+                .into_iter()
+                .map(|(dir, b)| (dir.to_string(), b.to_string()))
+                .collect(),
+            remote_branches: remote_branches
+                .into_iter()
+                .map(|((dir, prefix), branches)| {
+                    (
+                        (dir.to_string(), prefix.to_string()),
+                        branches.into_iter().map(String::from).collect(),
+                    )
+                })
+                .collect(),
+            merged: merged
+                .into_iter()
+                .map(|((dir, b, t), v)| ((dir.to_string(), b.to_string(), t.to_string()), v))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn rig_handoff_gaps_flags_an_open_unassigned_bead_with_a_real_unmerged_pushed_branch() {
+        let rig = rig_raw("luminate", false);
+        let mut orphaned = bead("luminate-bgb.2", "open");
+        orphaned.assignee = None;
+
+        let git = git_with(
+            vec![("/fake/luminate", "master")],
+            vec![(
+                ("/fake/luminate", "polecat/"),
+                vec!["polecat/luminate-bgb.2"],
+            )],
+            vec![], // not configured -> is_merged defaults to false (unmerged)
+        );
+        let adapters = adapters_for_handoff(vec![rig.clone()], vec![], git);
+
+        let view = rig_handoff_gaps(&adapters, &rig, &[orphaned]);
+        assert_eq!(view.base_branch.as_deref(), Some("master"));
+        assert_eq!(view.gaps.len(), 1);
+        assert_eq!(view.gaps[0].bead_id, "luminate-bgb.2");
+        assert_eq!(view.gaps[0].branch, "polecat/luminate-bgb.2");
+        assert_eq!(view.gaps[0].bead_status.as_deref(), Some("open"));
+        assert_eq!(view.gaps[0].bead_assignee, None);
+    }
+
+    #[test]
+    fn rig_handoff_gaps_ignores_a_branch_that_already_landed_on_the_base_branch() {
+        let rig = rig_raw("luminate", false);
+        let landed = bead("luminate-1", "open");
+
+        let git = git_with(
+            vec![("/fake/luminate", "master")],
+            vec![(("/fake/luminate", "polecat/"), vec!["polecat/luminate-1"])],
+            vec![(
+                ("/fake/luminate", "polecat/luminate-1", "master"),
+                true, // already merged
+            )],
+        );
+        let adapters = adapters_for_handoff(vec![rig.clone()], vec![], git);
+
+        let view = rig_handoff_gaps(&adapters, &rig, &[landed]);
+        assert!(view.gaps.is_empty());
+    }
+
+    #[test]
+    fn rig_handoff_gaps_ignores_a_bead_that_is_in_progress_and_assigned() {
+        // Normal, healthy in-flight work -- an in_progress bead with a
+        // pushed-but-unmerged branch is exactly the expected shape while a
+        // polecat is still actively working, not a gap.
+        let rig = rig_raw("luminate", false);
+        let mut active = bead("luminate-1", "in_progress");
+        active.assignee = Some("gastown__polecat-cc-abcd".to_string());
+
+        let git = git_with(
+            vec![("/fake/luminate", "master")],
+            vec![(("/fake/luminate", "polecat/"), vec!["polecat/luminate-1"])],
+            vec![],
+        );
+        let adapters = adapters_for_handoff(vec![rig.clone()], vec![], git);
+
+        let view = rig_handoff_gaps(&adapters, &rig, &[active]);
+        assert!(view.gaps.is_empty());
+    }
+
+    #[test]
+    fn rig_handoff_gaps_ignores_a_pending_bead_that_is_still_assigned() {
+        // "Unassigned" is load-bearing: a blocked/deferred bead that still
+        // has an assignee isn't the incident shape this check exists to
+        // catch.
+        let rig = rig_raw("luminate", false);
+        let mut blocked = bead("luminate-1", "blocked");
+        blocked.assignee = Some("gastown__polecat-cc-abcd".to_string());
+
+        let git = git_with(
+            vec![("/fake/luminate", "master")],
+            vec![(("/fake/luminate", "polecat/"), vec!["polecat/luminate-1"])],
+            vec![],
+        );
+        let adapters = adapters_for_handoff(vec![rig.clone()], vec![], git);
+
+        let view = rig_handoff_gaps(&adapters, &rig, &[blocked]);
+        assert!(view.gaps.is_empty());
+    }
+
+    #[test]
+    fn rig_handoff_gaps_flags_a_branch_with_no_matching_bd_record_at_all() {
+        let rig = rig_raw("luminate", false);
+
+        let git = git_with(
+            vec![("/fake/luminate", "master")],
+            vec![(
+                ("/fake/luminate", "polecat/"),
+                vec!["polecat/luminate-ghost"],
+            )],
+            vec![],
+        );
+        let adapters = adapters_for_handoff(vec![rig.clone()], vec![], git);
+
+        let view = rig_handoff_gaps(&adapters, &rig, &[]);
+        assert_eq!(view.gaps.len(), 1);
+        assert_eq!(view.gaps[0].bead_id, "luminate-ghost");
+        assert_eq!(view.gaps[0].bead_status, None);
+        assert_eq!(view.gaps[0].bead_assignee, None);
+    }
+
+    #[test]
+    fn rig_handoff_gaps_reports_no_gaps_when_the_base_branch_cannot_be_determined() {
+        // No default_branch configured in the mock -> None, same as a real
+        // rig whose clone never got an origin/HEAD symref. `gaps` must come
+        // back empty here, not error -- but callers must read that
+        // alongside `base_branch: None`, not as a confirmed "all clear."
+        let rig = rig_raw("luminate", false);
+        let orphaned = bead("luminate-bgb.2", "open");
+
+        let git = git_with(
+            vec![], // no default_branch configured
+            vec![(
+                ("/fake/luminate", "polecat/"),
+                vec!["polecat/luminate-bgb.2"],
+            )],
+            vec![],
+        );
+        let adapters = adapters_for_handoff(vec![rig.clone()], vec![], git);
+
+        let view = rig_handoff_gaps(&adapters, &rig, &[orphaned]);
+        assert_eq!(view.base_branch, None);
+        assert!(view.gaps.is_empty());
+    }
+
+    #[test]
+    fn handoff_gap_report_scans_every_non_suspended_rig_when_no_rig_is_given() {
+        let active_rig = rig_raw("luminate", false);
+        let sleepy_rig = rig_raw("sleepyrig", true);
+        let mut orphaned = bead("luminate-bgb.2", "open");
+        orphaned.assignee = None;
+
+        let git = git_with(
+            vec![("/fake/luminate", "master")],
+            vec![(
+                ("/fake/luminate", "polecat/"),
+                vec!["polecat/luminate-bgb.2"],
+            )],
+            vec![],
+        );
+        let adapters = adapters_for_handoff(
+            vec![active_rig, sleepy_rig],
+            vec![("/fake/luminate", vec![orphaned])],
+            git,
+        );
+
+        let report = handoff_gap_report(&adapters, None, None).unwrap();
+        assert_eq!(report.rigs.len(), 1, "suspended rigs must be skipped");
+        assert_eq!(report.rigs[0].rig_name, "luminate");
+        assert_eq!(report.rigs[0].gaps.len(), 1);
+        assert!(!report.ok);
+    }
+
+    #[test]
+    fn handoff_gap_report_scopes_to_a_single_named_rig() {
+        let rig = rig_raw("luminate", false);
+        let git = git_with(vec![("/fake/luminate", "master")], vec![], vec![]);
+        let adapters = adapters_for_handoff(vec![rig], vec![("/fake/luminate", vec![])], git);
+
+        let report = handoff_gap_report(&adapters, None, Some("luminate")).unwrap();
+        assert_eq!(report.rigs.len(), 1);
+        assert!(report.ok);
+    }
+
+    #[test]
+    fn handoff_gap_report_errors_clearly_for_an_unknown_named_rig() {
+        let adapters = adapters_for_handoff(vec![], vec![], MockGit::default());
+        let err = handoff_gap_report(&adapters, None, Some("not-a-real-rig")).unwrap_err();
+        assert!(err.to_string().contains("no rig named"));
+    }
+
+    #[test]
+    fn handoff_gap_report_records_a_per_rig_error_without_aborting_other_rigs() {
+        let broken_rig = rig_raw("broken", false);
+        let healthy_rig = rig_raw("healthy", false);
+        // Only "healthy"'s bd list is configured -- "broken"'s bd.list call
+        // fails inside the mock (mocks.rs' lenient "not configured" error).
+        let git = git_with(vec![("/fake/healthy", "master")], vec![], vec![]);
+        let adapters = adapters_for_handoff(
+            vec![broken_rig, healthy_rig],
+            vec![("/fake/healthy", vec![])],
+            git,
+        );
+
+        let report = handoff_gap_report(&adapters, None, None).unwrap();
+        let broken = report.rigs.iter().find(|r| r.rig_name == "broken").unwrap();
+        assert!(broken.error.is_some());
+        assert!(broken.gaps.is_empty());
+        let healthy = report
+            .rigs
+            .iter()
+            .find(|r| r.rig_name == "healthy")
+            .unwrap();
+        assert!(healthy.error.is_none());
+        assert!(
+            report.ok,
+            "a per-rig fetch error alone must not flip ok to false"
         );
     }
 
